@@ -1,0 +1,131 @@
+# Zehnder Monitor
+
+Physics-based filter health monitoring for the **Zehnder ComfoAir Q600** HRV.  
+Runs as a standalone [AppDaemon](https://appdaemon.readthedocs.io/) app for Home Assistant.
+
+## Why?
+
+The ComfoAir's built-in filter timer is a dumb countdown — it has no idea whether your filters are actually degraded. This monitor uses the unit's own telemetry to detect **real** performance degradation:
+
+| Metric | What It Tells You |
+|---|---|
+| **Specific Fan Power (SFP)** | Electrical energy required per unit of air moved. Rises as filters clog. |
+| **Duty Ratio** | Supply duty / exhaust duty. Speed-independent measure of differential filter loading. |
+| **RPM/Flow** | How hard each impeller works per unit of airflow. Direct resistance proxy. |
+| **Heat Recovery η** | Seasonal check on heat exchanger condition. |
+
+### Why Duty Ratio, Not Absolute Asymmetry?
+
+Pressure drop through filter media scales with Q² (turbulent flow). At higher fan speeds, the absolute duty gap between supply and exhaust **naturally widens** even with identical filter condition. The **ratio** normalises for this, giving a speed-independent signal.
+
+## Architecture
+
+```
+Zehnder ComfoAir Q600
+       │
+       ▼
+  Home Assistant (native integration)
+       │
+       ▼
+  AppDaemon ──── zehnder_monitor.py
+       │              │
+       ▼              ▼
+  HA Sensors     MQTT Telemetry
+  (dashboard)    (zehnder/monitor/state)
+       │
+       ▼
+  Notifications
+  (all devices + persistent HA banners)
+```
+
+## Sensors Created
+
+| Sensor | Type | Description |
+|---|---|---|
+| `sensor.zehnder_sfp` | kW/(m³/s) | Specific Fan Power with EU class attribute |
+| `sensor.zehnder_filter_health` | % | Composite health score (0–100) |
+| `sensor.zehnder_duty_ratio` | ratio | Supply/exhaust duty ratio |
+| `sensor.zehnder_heat_recovery` | % | Heat recovery efficiency |
+| `sensor.zehnder_sfp_trend` | mW/(m³/s)/day | SFP degradation rate from 7-day regression |
+
+## Alert Tiers
+
+| Level | Threshold | Frequency | Channel |
+|---|---|---|---|
+| Advisory | Health < 60% | 1/day | All devices + HA banner |
+| Warning | Health < 30% | 1/6h | All devices + HA banner |
+| Critical | Health < 10% OR SFP > 0.75 | 1/hour | All devices + HA banner |
+
+## Installation
+
+1. **Clone** this repo on the machine running AppDaemon:
+   ```bash
+   git clone https://github.com/astyrrian1/zehnder-monitor.git
+   ```
+
+2. **Symlink** into your AppDaemon apps directory:
+   ```bash
+   ln -s ~/zehnder-monitor/apps/zehnder_monitor /path/to/appdaemon/apps/zehnder_monitor
+   ```
+
+3. **Restart** AppDaemon. The monitor starts automatically.
+
+## Requirements
+
+- Home Assistant with the Zehnder ComfoAir Q integration
+- AppDaemon 4.x
+- MQTT broker (for telemetry publishing)
+- `notify.notify` service configured (sends to all notification targets)
+
+## Conditioned Sampling
+
+The monitor only records SFP samples for trend analysis when:
+- Fan level is **Low** (steady-state, most time spent here)
+- Bypass is **< 5%** (no economizer interference)
+- Power is **> 20W** (unit actually running)
+- Flow imbalance is **< 10%** (no defrost or anomaly)
+
+This ensures trend comparisons are apples-to-apples over weeks and months.
+
+## Baseline Management
+
+Baselines are captured automatically when a filter change is detected (the countdown timer jumps by >90 days). After detection, the system waits 2 hours for stabilisation before recording.
+
+Baselines persist in `baselines.json` alongside the app.
+
+## Health Score Formula
+
+```
+Health = (SFP_score × 0.50) + (Ratio_score × 0.30) + (Timer_score × 0.20)
+
+SFP_score:   100 at 0.35 kW/(m³/s), 0 at 0.80 kW/(m³/s)
+Ratio_score: 100 at 1.20x,          0 at 2.50x
+Timer_score: 100 at 180 days,       0 at 0 days
+```
+
+## MQTT Telemetry
+
+Published to `zehnder/monitor/state` (retained) every 60 seconds:
+
+```json
+{
+  "timestamp": "2026-04-04T19:00:00",
+  "metrics": {
+    "sfp": 0.4521,
+    "duty_ratio": 1.482,
+    "heat_recovery_eta": 89.2
+  },
+  "health": {
+    "score": 64.3,
+    "status": "Good",
+    "sfp_trend_per_day": 0.000312,
+    "conditioned_samples": 847
+  },
+  "raw": { ... },
+  "baselines": { ... }
+}
+```
+
+## License
+
+MIT
