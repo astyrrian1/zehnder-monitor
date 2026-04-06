@@ -54,19 +54,28 @@ Zehnder ComfoAir Q600
 
 ## Alert Tiers
 
-AppDaemon outputs raw scores. Alert states and notifications should be managed via native Home Assistant constructs to leverage built-in hysteresis and trace tools.
+AppDaemon outputs raw scores. Alerting is handled by a **blueprint** — a reusable automation template you import once and configure per tier.
 
-### Recommended Configuration:
+### Setup (one-time)
 
-1. **Threshold Helpers** (Create in HA UI: *Devices & Services > Helpers*)
-   - **Advisory:** Tracks `sensor.zehnder_filter_health` (Lower limit: 60)
-   - **Warning:** Tracks `sensor.zehnder_filter_health` (Lower limit: 30)
-   - **Critical:** Tracks `sensor.zehnder_filter_health` (Lower limit: 10) OR `sensor.zehnder_sfp` (Upper limit: 0.75)
+1. **Import the blueprint** — click this link in your HA instance:
 
-2. **Native HA Automations**
-   - Trigger off the binary sensors created by the Threshold Helpers.
-   - Use automation `mode: single` with `delay` blocks (e.g., 24h, 6h, 1h) to rate-limit outbound messages.
-   - Target precise `device_id`s or specialized notification groups natively.
+   [![Import Blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fastyrrian1%2Fzehnder-monitor%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fzehnder_filter_alert.yaml)
+
+   Or manually: **Settings → Automations → Blueprints → Import Blueprint** and paste:
+   ```
+   https://github.com/astyrrian1/zehnder-monitor/blob/main/blueprints/automation/zehnder_filter_alert.yaml
+   ```
+
+2. **Create three automations** from the blueprint (Settings → Automations → Create → Use Blueprint):
+
+   | Tier | Threshold | Cooldown | What It Means |
+   |---|---|---|---|
+   | **Advisory** | 60% | 24 hours | Filters aging — keep an eye on it |
+   | **Warning** | 30% | 6 hours | Plan a replacement soon |
+   | **Critical** | 10% | 1 hour | Replace immediately — energy waste and reduced airflow |
+
+   For each, select your preferred notification target (persistent notification, mobile app, etc.).
 
 ## Installation
 
@@ -93,7 +102,9 @@ AppDaemon outputs raw scores. Alert states and notifications should be managed v
    - Click **⋮ → Custom repositories**, add `astyrrian1/zehnder-monitor` as **AppDaemon**
    - Search for **Zehnder Monitor** and click **Install**
 
-3. **Restart AppDaemon** (Settings → Add-ons → AppDaemon → Restart)
+3. **Import the alert blueprint** (see [Alert Tiers](#alert-tiers) above)
+
+4. **Restart AppDaemon** (Settings → Add-ons → AppDaemon → Restart)
 
 Updates are handled through HACS — click **Update** when a new release is available, then restart AppDaemon.
 

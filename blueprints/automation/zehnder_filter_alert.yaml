@@ -1,0 +1,128 @@
+blueprint:
+  name: "Zehnder Filter Health Alert"
+  description: >
+    Sends a notification when the Zehnder filter health score drops below a
+    configured threshold. Create one automation instance per alert tier:
+
+    - **Advisory** (threshold: 60, cooldown: 24h) — filters are aging
+    - **Warning** (threshold: 30, cooldown: 6h) — plan a replacement
+    - **Critical** (threshold: 10, cooldown: 1h) — replace immediately
+
+    Requires the Zehnder Monitor AppDaemon app to be running.
+  domain: automation
+  source_url: https://github.com/astyrrian1/zehnder-monitor/blob/main/blueprints/automation/zehnder_filter_alert.yaml
+  input:
+    health_sensor:
+      name: Filter Health Sensor
+      description: The Zehnder filter health sensor entity.
+      default: sensor.zehnder_filter_health
+      selector:
+        entity:
+          domain: sensor
+    threshold:
+      name: Health Threshold
+      description: >
+        Alert when filter health drops below this value.
+        Recommended: 60 (advisory), 30 (warning), 10 (critical).
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 90
+          step: 5
+          unit_of_measurement: "%"
+    severity:
+      name: Alert Severity
+      description: Label used in the notification title.
+      default: "Warning"
+      selector:
+        select:
+          options:
+            - "Advisory"
+            - "Warning"
+            - "Critical"
+    cooldown_hours:
+      name: Notification Cooldown
+      description: >
+        Minimum hours between repeat notifications while the health
+        remains below the threshold.
+        Recommended: 24 (advisory), 6 (warning), 1 (critical).
+      default: 6
+      selector:
+        number:
+          min: 1
+          max: 72
+          step: 1
+          unit_of_measurement: "hours"
+    notify_service:
+      name: Notification Service
+      description: >
+        The notify service to use (e.g., notify.notify, notify.mobile_app_phone).
+        Leave default for the built-in persistent notification.
+      default: "persistent_notification"
+      selector:
+        select:
+          options:
+            - "persistent_notification"
+            - "notify.notify"
+            - "notify.mobile_app"
+          custom_value: true
+
+mode: single
+
+trigger:
+  - platform: numeric_state
+    entity_id: !input health_sensor
+    below: !input threshold
+    for:
+      minutes: 5
+
+action:
+  - variables:
+      severity: !input severity
+      threshold: !input threshold
+      notify_target: !input notify_service
+      health: "{{ states('sensor.zehnder_filter_health') }}"
+      sfp: "{{ states('sensor.zehnder_sfp') }}"
+      sfp_class: "{{ state_attr('sensor.zehnder_sfp', 'sfp_class') }}"
+      duty_ratio: "{{ states('sensor.zehnder_duty_ratio') }}"
+      status: "{{ state_attr('sensor.zehnder_filter_health', 'status') }}"
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ notify_target == 'persistent_notification' }}"
+        sequence:
+          - service: persistent_notification.create
+            data:
+              title: "🌀 Zehnder Filter {{ severity }}"
+              message: >
+                Filter health is **{{ health }}%** ({{ status }}).
+
+                - SFP: {{ sfp }} kW/(m³/s) — {{ sfp_class }}
+                - Duty ratio: {{ duty_ratio }}x
+                - Threshold: {{ threshold }}%
+
+                {% if severity == 'Critical' %}
+                **Replace filters now.** High SFP wastes energy and reduces airflow.
+                {% elif severity == 'Warning' %}
+                Plan a filter replacement soon.
+                {% else %}
+                Filters are aging — monitor over the next week.
+                {% endif %}
+              notification_id: "zehnder_filter_{{ severity | lower }}"
+    default:
+      - service: "{{ notify_target }}"
+        data:
+          title: "🌀 Zehnder Filter {{ severity }}"
+          message: >
+            Filter health is {{ health }}% ({{ status }}).
+            SFP: {{ sfp }} ({{ sfp_class }}), Duty ratio: {{ duty_ratio }}x.
+            {% if severity == 'Critical' %}Replace filters now.
+            {% elif severity == 'Warning' %}Plan a filter replacement soon.
+            {% else %}Filters are aging — monitor over the next week.{% endif %}
+          data:
+            tag: "zehnder_filter_{{ severity | lower }}"
+
+  - delay:
+      hours: !input cooldown_hours
