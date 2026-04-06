@@ -62,12 +62,6 @@ class ZehnderMonitor(hass.Hass):
 
     FILTER_CYCLE   = 180    # Nominal days between filter changes
 
-    # === ALERT THRESHOLDS ===
-    HEALTH_ADVISORY = 60
-    HEALTH_WARNING  = 30
-    HEALTH_CRITICAL = 10
-    SFP_ABS_CRIT    = 0.75  # Absolute SFP critical regardless of score
-
     # === TIMING ===
     TICK_SECONDS   = 60
     BUFFER_HOURS   = 168    # 7-day conditioned sample window
@@ -98,7 +92,6 @@ class ZehnderMonitor(hass.Hass):
 
         self.last_filter_days = None
         self.baseline_timer = None
-        self.last_alert = {"advisory": 0, "warning": 0, "critical": 0}
         self.tick_count = 0
 
         self.baselines = self._load_json(self.BASELINE_FILE, self._defaults())
@@ -152,7 +145,6 @@ class ZehnderMonitor(hass.Hass):
             "ratio_buffer": [(t, v) for t, v in self.ratio_buffer if t > cutoff],
             "rpm_ratio_buffer": [(t, v) for t, v in self.rpm_ratio_buffer if t > cutoff],
             "last_filter_days": self.last_filter_days,
-            "last_alert": self.last_alert,
             "saved_at": datetime.now().isoformat(),
         })
 
@@ -163,7 +155,6 @@ class ZehnderMonitor(hass.Hass):
         self.ratio_buffer = s.get("ratio_buffer", [])
         self.rpm_ratio_buffer = s.get("rpm_ratio_buffer", [])
         self.last_filter_days = s.get("last_filter_days")
-        self.last_alert.update(s.get("last_alert", {}))
 
     # =================================================================
     # SENSOR I/O
@@ -372,60 +363,6 @@ class ZehnderMonitor(hass.Hass):
         self.health_score = round(sfp_s * 0.50 + rat_s * 0.30 + tim_s * 0.20, 1)
 
     # =================================================================
-    # ALERTS
-    # =================================================================
-
-    def _alerts(self, r):
-        now = time.time()
-
-        if self.health_score < self.HEALTH_CRITICAL or self.sfp > self.SFP_ABS_CRIT:
-            if now - self.last_alert["critical"] > 3600:
-                self.last_alert["critical"] = now
-                self._notify(
-                    "ZEHNDER: Replace Filters Now",
-                    f"CRITICAL -- Health: {self.health_score:.0f}%\n"
-                    f"SFP: {self.sfp:.3f} ({self._sfp_c()})\n"
-                    f"Duty Ratio: {self.duty_ratio:.2f}x "
-                    f"(supply {r['supply_duty']:.0f}% / exhaust {r['exhaust_duty']:.0f}%)\n"
-                    f"Timer: {r.get('filter_days', '?')} days\n\n"
-                    f"Excessive energy to maintain airflow. Risk of fan motor stress.",
-                    "zehnder_filter_critical"
-                )
-            return
-
-        if self.health_score < self.HEALTH_WARNING:
-            if now - self.last_alert["warning"] > 21600:
-                self.last_alert["warning"] = now
-                self._notify(
-                    "Zehnder Filter Warning",
-                    f"Health: {self.health_score:.0f}%\n"
-                    f"SFP: {self.sfp:.3f} | Ratio: {self.duty_ratio:.2f}x\n"
-                    f"Timer: {r.get('filter_days', '?')} days\n"
-                    f"Replace filters soon.",
-                    "zehnder_filter_warning"
-                )
-            return
-
-        if self.health_score < self.HEALTH_ADVISORY:
-            if now - self.last_alert["advisory"] > 86400:
-                self.last_alert["advisory"] = now
-                trend = ""
-                if abs(self.sfp_trend_slope) > 0.0001:
-                    d = "rising" if self.sfp_trend_slope > 0 else "falling"
-                    trend = (
-                        f"\nSFP trend: {d} "
-                        f"{abs(self.sfp_trend_slope*1000):.1f} mW/(m3/s)/day"
-                    )
-                self._notify(
-                    "Zehnder Filter Advisory",
-                    f"Health: {self.health_score:.0f}%\n"
-                    f"SFP: {self.sfp:.3f} ({self._sfp_c()})\n"
-                    f"Timer: {r.get('filter_days', '?')} days{trend}\n"
-                    f"Consider ordering filters.",
-                    "zehnder_filter_advisory"
-                )
-
-    # =================================================================
     # NOTIFICATIONS
     # =================================================================
 
@@ -577,7 +514,6 @@ class ZehnderMonitor(hass.Hass):
         self._sample(r)
         self._detect_change(r)
         self._health(r)
-        self._alerts(r)
         self._publish_sensors()
         self._publish_mqtt(r)
 

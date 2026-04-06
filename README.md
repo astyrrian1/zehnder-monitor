@@ -20,7 +20,7 @@ Pressure drop through filter media scales with Q² (turbulent flow). At higher f
 
 ## Architecture
 
-```
+```text
 Zehnder ComfoAir Q600
        │
        ▼
@@ -31,11 +31,15 @@ Zehnder ComfoAir Q600
        │              │
        ▼              ▼
   HA Sensors     MQTT Telemetry
-  (dashboard)    (zehnder/monitor/state)
+  (Raw metrics)  (zehnder/monitor/state)
        │
        ▼
-  Notifications
-  (all devices + persistent HA banners)
+  HA Threshold Helpers
+  (State tracking & hysteresis)
+       │
+       ▼
+  HA Automations
+  (Rate-limited notifications)
 ```
 
 ## Sensors Created
@@ -50,11 +54,19 @@ Zehnder ComfoAir Q600
 
 ## Alert Tiers
 
-| Level | Threshold | Frequency | Channel |
-|---|---|---|---|
-| Advisory | Health < 60% | 1/day | All devices + HA banner |
-| Warning | Health < 30% | 1/6h | All devices + HA banner |
-| Critical | Health < 10% OR SFP > 0.75 | 1/hour | All devices + HA banner |
+AppDaemon outputs raw scores. Alert states and notifications should be managed via native Home Assistant constructs to leverage built-in hysteresis and trace tools.
+
+### Recommended Configuration:
+
+1. **Threshold Helpers** (Create in HA UI: *Devices & Services > Helpers*)
+   - **Advisory:** Tracks `sensor.zehnder_filter_health` (Lower limit: 60)
+   - **Warning:** Tracks `sensor.zehnder_filter_health` (Lower limit: 30)
+   - **Critical:** Tracks `sensor.zehnder_filter_health` (Lower limit: 10) OR `sensor.zehnder_sfp` (Upper limit: 0.75)
+
+2. **Native HA Automations**
+   - Trigger off the binary sensors created by the Threshold Helpers.
+   - Use automation `mode: single` with `delay` blocks (e.g., 24h, 6h, 1h) to rate-limit outbound messages.
+   - Target precise `device_id`s or specialized notification groups natively.
 
 ## Installation
 
@@ -75,7 +87,7 @@ Zehnder ComfoAir Q600
 - Home Assistant with the Zehnder ComfoAir Q integration
 - AppDaemon 4.x
 - MQTT broker (for telemetry publishing)
-- `notify.notify` service configured (sends to all notification targets)
+- Native Threshold Helpers and Automations configured in HA UI (for alerting)
 
 ## Conditioned Sampling
 
@@ -85,7 +97,7 @@ The monitor only records SFP samples for trend analysis when:
 - Power is **> 20W** (unit actually running)
 - Flow imbalance is **< 10%** (no defrost or anomaly)
 
-This ensures trend comparisons are apples-to-apples over weeks and months.
+This ensures trend comparisons are apples-to-apples over weeks and months. *(Note: Because of this highly conditional filtering, AppDaemon handles the 7-day regression internally rather than relying on HA's native `derivative` helper).*
 
 ## Baseline Management
 
