@@ -11,7 +11,27 @@ This repository contains a standalone, physics-based filter health monitoring sy
   - Application logic: `apps/zehnder_monitor/zehnder_monitor.py`
   - State persistence (baselines, trends) is handled via local `*.json` files in the app directory.
 
+## Deployment
+- This repo is **HACS-managed** as an AppDaemon app (category: `appdaemon`).
+- HACS repo registration: `astyrrian1/zehnder-monitor`
+- HACS deploys `apps/zehnder_monitor/zehnder_monitor.py` into the AppDaemon apps directory.
+- The `apps.yaml` module binding lives in the AppDaemon config on the HA host, **not** in this repo.
+
+## Release Management — MANDATORY
+Every push to `main` **MUST** be accompanied by:
+1. A **semver git tag** (e.g., `v1.2.0`) — HACS tracks releases via tags.
+2. A **GitHub Release** with release notes summarizing what changed.
+3. Use the `/release` workflow for the exact steps.
+
+**Versioning rules:**
+- Patch (`v1.1.x`): docs-only changes, minor fixes
+- Minor (`v1.x.0`): new features, behavioural changes, config changes
+- Major (`vX.0.0`): breaking changes requiring user migration
+
+**Never push to `main` without a tagged release.** HACS users will not receive update notifications without one.
+
 ## Maintenance Guidelines
 - Ensure that the syntax is compatible with AppDaemon 4.x.
 - Remember to use `self.log()`, `self.get_state()`, `self.set_state()`, and `self.call_service()` provided by the `hass.Hass` base class.
 - Retain all telemetry MQTT publishing to `zehnder/monitor/state` as external data sinks may rely on it.
+- **Alerting logic belongs in native HA** (Threshold Helpers + Automations), not in this Python code. AppDaemon is the math/sensor engine only.
