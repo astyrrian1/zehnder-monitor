@@ -1,0 +1,7 @@
+---
+# Zehnder ComfoAir Q600 Filter Health Monitor
+# Deployed by HACS. Do not edit — updates will overwrite this file.
+
+zehnder_monitor:
+  module: zehnder_monitor
+  class: ZehnderMonitor

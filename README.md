@@ -76,15 +76,9 @@ AppDaemon outputs raw scores. Alert states and notifications should be managed v
 2. Go to **Automation** (AppDaemon category)
 3. Click **⋮ → Custom repositories**, add `astyrrian1/zehnder-monitor` as **AppDaemon**
 4. Search for **Zehnder Monitor** and click **Install**
-5. Add the module binding to your AppDaemon `apps.yaml`:
-   ```yaml
-   zehnder_monitor:
-     module: zehnder_monitor
-     class: ZehnderMonitor
-   ```
-6. Restart AppDaemon
+5. Restart AppDaemon
 
-Updates are handled through HACS — just click **Update** when a new release is available.
+The `apps.yaml` module binding is included — AppDaemon will auto-discover it. Updates are handled through HACS — just click **Update** when a new release is available.
 
 ### Option B: Manual
 
@@ -96,8 +90,7 @@ Updates are handled through HACS — just click **Update** when a new release is
    ```bash
    ln -s ~/zehnder-monitor/apps/zehnder_monitor /path/to/appdaemon/apps/zehnder_monitor
    ```
-3. Add the `apps.yaml` entry shown above
-4. Restart AppDaemon
+3. Restart AppDaemon
 
 ## Requirements
 
