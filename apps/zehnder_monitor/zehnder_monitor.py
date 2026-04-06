@@ -388,53 +388,41 @@ class ZehnderMonitor(hass.Hass):
     # =================================================================
 
     def _publish_sensors(self):
-        self.set_state(
-            "sensor.zehnder_sfp", state=round(self.sfp, 3),
-            attributes={
-                "unit_of_measurement": "kW/(m3/s)",
+        sensors = [
+            ("sensor.zehnder_sfp", round(self.sfp, 3), {
+                "unit_of_measurement": "kW/(m³/s)",
                 "state_class": "measurement", "icon": "mdi:speedometer",
                 "friendly_name": "Zehnder SFP", "sfp_class": self._sfp_c(),
-            }
-        )
-        self.set_state(
-            "sensor.zehnder_filter_health",
-            state=round(self.health_score, 0),
-            attributes={
+            }),
+            ("sensor.zehnder_filter_health", round(self.health_score, 1), {
                 "unit_of_measurement": "%",
                 "state_class": "measurement", "icon": "mdi:air-filter",
                 "friendly_name": "Zehnder Filter Health",
                 "status": self._health_l(),
-            }
-        )
-        self.set_state(
-            "sensor.zehnder_duty_ratio",
-            state=round(self.duty_ratio, 3),
-            attributes={
+            }),
+            ("sensor.zehnder_duty_ratio", round(self.duty_ratio, 3), {
                 "state_class": "measurement",
                 "icon": "mdi:arrow-split-vertical",
                 "friendly_name": "Zehnder Duty Ratio",
                 "absolute_asymmetry_pct": round(self.duty_asymmetry_abs, 1),
-            }
-        )
-        self.set_state(
-            "sensor.zehnder_heat_recovery",
-            state=round(self.heat_recovery_eta, 1),
-            attributes={
+            }),
+            ("sensor.zehnder_heat_recovery", round(self.heat_recovery_eta, 1), {
                 "unit_of_measurement": "%",
                 "state_class": "measurement", "icon": "mdi:heat-wave",
                 "friendly_name": "Zehnder Heat Recovery",
-            }
-        )
-        self.set_state(
-            "sensor.zehnder_sfp_trend",
-            state=round(self.sfp_trend_slope * 1000, 2),
-            attributes={
-                "unit_of_measurement": "mW/(m3/s)/day",
+            }),
+            ("sensor.zehnder_sfp_trend", round(self.sfp_trend_slope * 1000, 2), {
+                "unit_of_measurement": "mW/(m³/s)/day",
                 "state_class": "measurement", "icon": "mdi:trending-up",
                 "friendly_name": "Zehnder SFP Trend",
                 "conditioned_samples_7d": len(self.sfp_buffer),
-            }
-        )
+            }),
+        ]
+        for eid, val, attrs in sensors:
+            try:
+                self.set_state(eid, state=str(val), attributes=attrs)
+            except Exception as e:
+                self.log(f"set_state({eid}) failed: {e}", level="WARNING")
 
     # =================================================================
     # MQTT

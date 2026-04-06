@@ -14,9 +14,9 @@ This repository contains a standalone, physics-based filter health monitoring sy
 ## Deployment
 - This repo is **HACS-managed** as an AppDaemon app (category: `appdaemon`).
 - HACS repo registration: `astyrrian1/zehnder-monitor`
-- HACS deploys the entire `apps/zehnder_monitor/` directory (Python module + `apps.yaml`) into AppDaemon's apps folder.
-- AppDaemon auto-discovers `apps.yaml` files in subdirectories — no manual binding needed.
-- The `apps.yaml` **must** be included in this repo so HACS deploys it. Without it, AppDaemon won't load the module.
+- HACS deploys to `/config/appdaemon/apps/zehnder-monitor/` (internal: `/homeassistant/appdaemon/apps/zehnder-monitor/`).
+- The `apps.yaml` **must** be included in this repo so HACS deploys it alongside the Python module. Without it, AppDaemon won't load the module.
+- **HA OS path mismatch:** The AppDaemon addon defaults to reading from `/addon_configs/a0d7b954_appdaemon/apps/`, NOT the HACS path. Users must set `app_dir: /homeassistant/appdaemon/apps/` in their `appdaemon.yaml` to bridge this. See README for details.
 
 ## Release Management — MANDATORY
 Every push to `main` **MUST** be accompanied by:

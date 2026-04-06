@@ -70,17 +70,34 @@ AppDaemon outputs raw scores. Alert states and notifications should be managed v
 
 ## Installation
 
-### Option A: HACS (Recommended)
+### HA OS with AppDaemon Addon
 
-1. Open **HACS** in your Home Assistant sidebar
-2. Go to **Automation** (AppDaemon category)
-3. Click **⋮ → Custom repositories**, add `astyrrian1/zehnder-monitor` as **AppDaemon**
-4. Search for **Zehnder Monitor** and click **Install**
-5. Restart AppDaemon
+1. **One-time setup — point AppDaemon at the HACS apps directory:**
 
-The `apps.yaml` module binding is included — AppDaemon will auto-discover it. Updates are handled through HACS — just click **Update** when a new release is available.
+   On HA OS, the AppDaemon addon defaults to reading apps from `/addon_configs/a0d7b954_appdaemon/apps/`, but HACS installs AppDaemon apps to `/config/appdaemon/apps/`. To bridge this, add `app_dir` to your AppDaemon config:
 
-### Option B: Manual
+   Open `/addon_configs/a0d7b954_appdaemon/appdaemon.yaml` (use File Editor or Studio Code Server — you may need to disable "Enforce base path" in the addon settings to access `/addon_configs/`):
+
+   ```yaml
+   appdaemon:
+     app_dir: /homeassistant/appdaemon/apps/
+     # ... keep your existing settings below
+   ```
+
+   > `/homeassistant/` is the internal mount point for `/config/` inside the addon container.
+
+   Restart AppDaemon after this change. **This only needs to be done once** — after this, all HACS-managed AppDaemon apps will load automatically.
+
+2. **Install via HACS:**
+   - Open **HACS → Automation** (AppDaemon category)
+   - Click **⋮ → Custom repositories**, add `astyrrian1/zehnder-monitor` as **AppDaemon**
+   - Search for **Zehnder Monitor** and click **Install**
+
+3. **Restart AppDaemon** (Settings → Add-ons → AppDaemon → Restart)
+
+Updates are handled through HACS — click **Update** when a new release is available, then restart AppDaemon.
+
+### Manual (Docker / venv installs)
 
 1. Clone this repo on the machine running AppDaemon:
    ```bash
