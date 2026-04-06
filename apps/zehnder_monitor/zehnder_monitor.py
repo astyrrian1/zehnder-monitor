@@ -74,7 +74,7 @@ class ZehnderMonitor(hass.Hass):
 
     def initialize(self):
         self.log("=" * 60)
-        self.log("ZEHNDER MONITOR v1.0.0 -- Physics-Based Filter Health")
+        self.log("ZEHNDER MONITOR v1.2.1 -- Physics-Based Filter Health")
         self.log("=" * 60)
 
         self.sfp = 0.0
