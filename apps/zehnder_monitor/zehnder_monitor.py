@@ -21,6 +21,7 @@ Completely standalone. No dependency on or awareness of HAPSIC.
 import appdaemon.plugins.hass.hassapi as hass
 import json
 import os
+import statistics
 import time
 from datetime import datetime
 
@@ -65,6 +66,8 @@ class ZehnderMonitor(hass.Hass):
     # === TIMING ===
     TICK_SECONDS   = 60
     BUFFER_HOURS   = 168    # 7-day conditioned sample window
+    HEALTH_HOURS   = 24     # Recent conditioned window for headline metrics
+    MIN_HEALTH_SAMPLES = 5
     STATE_FILE     = "state.json"
     BASELINE_FILE  = "baselines.json"
 
@@ -74,7 +77,7 @@ class ZehnderMonitor(hass.Hass):
 
     def initialize(self):
         self.log("=" * 60)
-        self.log("ZEHNDER MONITOR v1.4.1 -- Physics-Based Filter Health")
+        self.log("ZEHNDER MONITOR v1.5.0 -- Physics-Based Filter Health")
         self.log("=" * 60)
 
         self.sfp = 0.0
@@ -85,6 +88,10 @@ class ZehnderMonitor(hass.Hass):
         self.heat_recovery_eta = 0.0
         self.health_score = 100.0
         self.sfp_trend_slope = 0.0
+        self.health_sfp = 0.0
+        self.health_duty_ratio = 1.0
+        self.sample_quality = "warming_up"
+        self.last_conditioned_sample_at = None
 
         self.sfp_buffer = []
         self.ratio_buffer = []
@@ -146,6 +153,7 @@ class ZehnderMonitor(hass.Hass):
             "ratio_buffer": [(t, v) for t, v in self.ratio_buffer if t > cutoff],
             "rpm_ratio_buffer": [(t, v) for t, v in self.rpm_ratio_buffer if t > cutoff],
             "last_filter_days": self.last_filter_days,
+            "last_conditioned_sample_at": self.last_conditioned_sample_at,
             "saved_at": datetime.now().isoformat(),
         })
 
@@ -156,6 +164,7 @@ class ZehnderMonitor(hass.Hass):
         self.ratio_buffer = s.get("ratio_buffer", [])
         self.rpm_ratio_buffer = s.get("rpm_ratio_buffer", [])
         self.last_filter_days = s.get("last_filter_days")
+        self.last_conditioned_sample_at = s.get("last_conditioned_sample_at")
 
     # =================================================================
     # SENSOR I/O
@@ -260,6 +269,7 @@ class ZehnderMonitor(hass.Hass):
             self.sfp_buffer.append((now, self.sfp))
             self.ratio_buffer.append((now, self.duty_ratio))
             self.rpm_ratio_buffer.append((now, self.supply_rpm_per_flow))
+            self.last_conditioned_sample_at = now
 
         # Prune to window
         cutoff = now - (self.BUFFER_HOURS * 3600)
@@ -267,9 +277,34 @@ class ZehnderMonitor(hass.Hass):
         self.ratio_buffer = [(t, v) for t, v in self.ratio_buffer if t > cutoff]
         self.rpm_ratio_buffer = [(t, v) for t, v in self.rpm_ratio_buffer if t > cutoff]
 
+        self._conditioned_metrics(now)
         self.sfp_trend_slope = (
             self._slope(self.sfp_buffer) if len(self.sfp_buffer) >= 20 else 0.0
         )
+
+    def _recent_values(self, buf, now, hours):
+        cutoff = now - (hours * 3600)
+        return [v for t, v in buf if t > cutoff]
+
+    def _conditioned_metrics(self, now):
+        sfp_recent = self._recent_values(self.sfp_buffer, now, self.HEALTH_HOURS)
+        ratio_recent = self._recent_values(self.ratio_buffer, now, self.HEALTH_HOURS)
+
+        if len(sfp_recent) >= self.MIN_HEALTH_SAMPLES:
+            self.health_sfp = statistics.median(sfp_recent)
+            self.health_duty_ratio = statistics.median(ratio_recent)
+            self.sample_quality = "conditioned"
+            return
+
+        if len(self.sfp_buffer) >= self.MIN_HEALTH_SAMPLES:
+            self.health_sfp = statistics.median(v for _, v in self.sfp_buffer)
+            self.health_duty_ratio = statistics.median(v for _, v in self.ratio_buffer)
+            self.sample_quality = "conditioned_stale"
+            return
+
+        self.health_sfp = self.sfp
+        self.health_duty_ratio = self.duty_ratio
+        self.sample_quality = "live_fallback"
 
     def _slope(self, buf):
         """Least-squares slope in units-per-day."""
@@ -354,10 +389,10 @@ class ZehnderMonitor(hass.Hass):
           Timer      20% -- sanity floor
         """
         sfp_s = max(0, min(100,
-            (self.SFP_REPLACE - self.sfp) /
+            (self.SFP_REPLACE - self.health_sfp) /
             (self.SFP_REPLACE - self.SFP_PRISTINE) * 100))
         rat_s = max(0, min(100,
-            (self.RATIO_REPLACE - self.duty_ratio) /
+            (self.RATIO_REPLACE - self.health_duty_ratio) /
             (self.RATIO_REPLACE - self.RATIO_PRISTINE) * 100))
         days = r.get("filter_days") or 0
         tim_s = max(0, min(100, days / self.FILTER_CYCLE * 100))
@@ -485,6 +520,30 @@ class ZehnderMonitor(hass.Hass):
                 "icon": "mdi:trending-up",
                 "value_template": "{{ (value_json.health.sfp_trend_per_day | float(0) * 1000) | round(2) }}",
             }),
+            ("sample_quality", {
+                "name": "Zehnder Sample Quality",
+                "unique_id": "zehnder_monitor_sample_quality",
+                "default_entity_id": "sensor.zehnder_sample_quality",
+                "icon": "mdi:check-decagram",
+                "value_template": "{{ value_json.health.sample_quality }}",
+            }),
+            ("conditioned_samples", {
+                "name": "Zehnder Conditioned Samples",
+                "unique_id": "zehnder_monitor_conditioned_samples",
+                "default_entity_id": "sensor.zehnder_conditioned_samples",
+                "state_class": "measurement",
+                "icon": "mdi:counter",
+                "value_template": "{{ value_json.health.conditioned_samples }}",
+            }),
+            ("raw_sfp", {
+                "name": "Zehnder Raw SFP",
+                "unique_id": "zehnder_monitor_raw_sfp",
+                "default_entity_id": "sensor.zehnder_raw_sfp",
+                "unit_of_measurement": "kW/(m³/s)",
+                "state_class": "measurement",
+                "icon": "mdi:pulse",
+                "value_template": "{{ value_json.raw.sfp }}",
+            }),
         ]
 
         for key, config in sensors:
@@ -504,8 +563,9 @@ class ZehnderMonitor(hass.Hass):
             "timestamp": datetime.now().isoformat(),
             "unit_online": True,
             "metrics": {
-                "sfp": round(self.sfp, 4), "sfp_class": self._sfp_c(),
-                "duty_ratio": round(self.duty_ratio, 3),
+                "sfp": round(self.health_sfp, 4),
+                "sfp_class": self._sfp_c(self.health_sfp),
+                "duty_ratio": round(self.health_duty_ratio, 3),
                 "duty_asymmetry_pct": round(self.duty_asymmetry_abs, 1),
                 "supply_rpm_per_flow": round(self.supply_rpm_per_flow, 3),
                 "exhaust_rpm_per_flow": round(self.exhaust_rpm_per_flow, 3),
@@ -515,8 +575,12 @@ class ZehnderMonitor(hass.Hass):
                 "score": self.health_score, "status": self._health_l(),
                 "sfp_trend_per_day": round(self.sfp_trend_slope, 6),
                 "conditioned_samples": len(self.sfp_buffer),
+                "sample_quality": self.sample_quality,
+                "last_conditioned_sample_at": self.last_conditioned_sample_at,
             },
             "raw": {
+                "sfp": round(self.sfp, 4),
+                "duty_ratio": round(self.duty_ratio, 3),
                 "power_w": r.get("power"),
                 "supply_flow": r.get("supply_flow"),
                 "exhaust_flow": r.get("exhaust_flow"),
@@ -544,10 +608,11 @@ class ZehnderMonitor(hass.Hass):
     # LABELS
     # =================================================================
 
-    def _sfp_c(self):
-        if self.sfp < 0.50: return "SFP 1 (Excellent)"
-        if self.sfp < 0.75: return "SFP 2 (Good)"
-        if self.sfp < 1.25: return "SFP 3 (Fair)"
+    def _sfp_c(self, sfp=None):
+        sfp = self.sfp if sfp is None else sfp
+        if sfp < 0.50: return "SFP 1 (Excellent)"
+        if sfp < 0.75: return "SFP 2 (Good)"
+        if sfp < 1.25: return "SFP 3 (Fair)"
         return "SFP 4 (Poor)"
 
     def _health_l(self):
@@ -581,9 +646,9 @@ class ZehnderMonitor(hass.Hass):
             self._persist()
             self.log(
                 f"[HB] Health:{self.health_score:.0f}% ({self._health_l()}) | "
-                f"SFP:{self.sfp:.3f} ({self._sfp_c()}) | "
-                f"Ratio:{self.duty_ratio:.2f}x | "
+                f"SFP:{self.health_sfp:.3f} ({self._sfp_c(self.health_sfp)}) | "
+                f"Raw:{self.sfp:.3f} | Ratio:{self.health_duty_ratio:.2f}x | "
                 f"Fan:{r['fan_level']} | eta:{self.heat_recovery_eta:.0f}% | "
                 f"Filter:{r.get('filter_days','?')}d | "
-                f"Buf:{len(self.sfp_buffer)}"
+                f"Buf:{len(self.sfp_buffer)} | Quality:{self.sample_quality}"
             )

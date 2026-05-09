@@ -51,6 +51,9 @@ Zehnder ComfoAir Q600
 | `sensor.zehnder_duty_ratio` | ratio | Supply/exhaust duty ratio |
 | `sensor.zehnder_heat_recovery` | % | Heat recovery efficiency |
 | `sensor.zehnder_sfp_trend` | mW/(m³/s)/day | SFP degradation rate from 7-day regression |
+| `sensor.zehnder_sample_quality` | text | Whether headline metrics are conditioned, stale, or live fallback |
+| `sensor.zehnder_conditioned_samples` | count | Number of 7-day conditioned samples feeding the trend |
+| `sensor.zehnder_raw_sfp` | kW/(m³/s) | Instantaneous diagnostic SFP before conditioning |
 
 ## Alert Tiers
 
@@ -130,13 +133,13 @@ Updates are handled through HACS — click **Update** when a new release is avai
 
 ## Conditioned Sampling
 
-The monitor only records SFP samples for trend analysis when:
+The monitor only records SFP samples when:
 - Fan level is **Low** (steady-state, most time spent here)
 - Bypass is **< 5%** (no economizer interference)
 - Power is **> 20W** (unit actually running)
 - Flow imbalance is **< 10%** (no defrost or anomaly)
 
-This ensures trend comparisons are apples-to-apples over weeks and months. *(Note: Because of this highly conditional filtering, AppDaemon handles the 7-day regression internally rather than relying on HA's native `derivative` helper).*
+Headline SFP, duty ratio, and health score use the median of recent conditioned samples when available. If fewer than five conditioned samples exist after startup, the monitor reports `sample_quality: live_fallback` and temporarily uses the current reading until enough steady-state samples accumulate. This keeps trend comparisons apples-to-apples over weeks and months. *(Note: Because of this highly conditional filtering, AppDaemon handles the 7-day regression internally rather than relying on HA's native `derivative` helper).*
 
 ## Baseline Management
 
