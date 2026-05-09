@@ -74,7 +74,7 @@ class ZehnderMonitor(hass.Hass):
 
     def initialize(self):
         self.log("=" * 60)
-        self.log("ZEHNDER MONITOR v1.4.0 -- Physics-Based Filter Health")
+        self.log("ZEHNDER MONITOR v1.4.1 -- Physics-Based Filter Health")
         self.log("=" * 60)
 
         self.sfp = 0.0
@@ -444,7 +444,7 @@ class ZehnderMonitor(hass.Hass):
             ("sfp", {
                 "name": "Zehnder SFP",
                 "unique_id": "zehnder_monitor_sfp",
-                "object_id": "zehnder_sfp",
+                "default_entity_id": "sensor.zehnder_sfp",
                 "unit_of_measurement": "kW/(m³/s)",
                 "state_class": "measurement",
                 "icon": "mdi:speedometer",
@@ -453,7 +453,7 @@ class ZehnderMonitor(hass.Hass):
             ("filter_health", {
                 "name": "Zehnder Filter Health",
                 "unique_id": "zehnder_monitor_filter_health",
-                "object_id": "zehnder_filter_health",
+                "default_entity_id": "sensor.zehnder_filter_health",
                 "unit_of_measurement": "%",
                 "state_class": "measurement",
                 "icon": "mdi:air-filter",
@@ -462,7 +462,7 @@ class ZehnderMonitor(hass.Hass):
             ("duty_ratio", {
                 "name": "Zehnder Duty Ratio",
                 "unique_id": "zehnder_monitor_duty_ratio",
-                "object_id": "zehnder_duty_ratio",
+                "default_entity_id": "sensor.zehnder_duty_ratio",
                 "state_class": "measurement",
                 "icon": "mdi:arrow-split-vertical",
                 "value_template": "{{ value_json.metrics.duty_ratio }}",
@@ -470,7 +470,7 @@ class ZehnderMonitor(hass.Hass):
             ("heat_recovery", {
                 "name": "Zehnder Heat Recovery",
                 "unique_id": "zehnder_monitor_heat_recovery",
-                "object_id": "zehnder_heat_recovery",
+                "default_entity_id": "sensor.zehnder_heat_recovery",
                 "unit_of_measurement": "%",
                 "state_class": "measurement",
                 "icon": "mdi:heat-wave",
@@ -479,7 +479,7 @@ class ZehnderMonitor(hass.Hass):
             ("sfp_trend", {
                 "name": "Zehnder SFP Trend",
                 "unique_id": "zehnder_monitor_sfp_trend",
-                "object_id": "zehnder_sfp_trend",
+                "default_entity_id": "sensor.zehnder_sfp_trend",
                 "unit_of_measurement": "mW/(m³/s)/day",
                 "state_class": "measurement",
                 "icon": "mdi:trending-up",
