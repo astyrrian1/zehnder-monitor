@@ -30,8 +30,8 @@ Zehnder ComfoAir Q600
   AppDaemon ──── zehnder_monitor.py
        │              │
        ▼              ▼
-  HA Sensors     MQTT Telemetry
-  (Raw metrics)  (zehnder/monitor/state)
+  MQTT Discovery  MQTT Telemetry
+  (HA Sensors)    (zehnder/monitor/state)
        │
        ▼
   HA Threshold Helpers
@@ -124,7 +124,7 @@ Updates are handled through HACS — click **Update** when a new release is avai
 
 - Home Assistant with the Zehnder ComfoAir Q integration
 - AppDaemon 4.x
-- MQTT broker (for telemetry publishing)
+- MQTT integration with discovery enabled (for HA sensor creation and telemetry publishing)
 - Native Threshold Helpers and Automations configured in HA UI (for alerting)
 - [HACS](https://hacs.xyz/) (recommended, for managed installation and updates)
 

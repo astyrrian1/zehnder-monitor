@@ -74,7 +74,7 @@ class ZehnderMonitor(hass.Hass):
 
     def initialize(self):
         self.log("=" * 60)
-        self.log("ZEHNDER MONITOR v1.2.1 -- Physics-Based Filter Health")
+        self.log("ZEHNDER MONITOR v1.4.0 -- Physics-Based Filter Health")
         self.log("=" * 60)
 
         self.sfp = 0.0
@@ -93,6 +93,7 @@ class ZehnderMonitor(hass.Hass):
         self.last_filter_days = None
         self.baseline_timer = None
         self.tick_count = 0
+        self.discovery_published = False
 
         self.baselines = self._load_json(self.BASELINE_FILE, self._defaults())
         saved = self._load_json(self.STATE_FILE, {})
@@ -428,6 +429,76 @@ class ZehnderMonitor(hass.Hass):
     # MQTT
     # =================================================================
 
+    def _publish_mqtt_discovery(self):
+        device = {
+            "identifiers": ["zehnder_monitor"],
+            "name": "Zehnder Monitor",
+            "manufacturer": "Zehnder",
+            "model": "ComfoAir Q600",
+        }
+        base = {
+            "state_topic": "zehnder/monitor/state",
+            "device": device,
+        }
+        sensors = [
+            ("sfp", {
+                "name": "Zehnder SFP",
+                "unique_id": "zehnder_monitor_sfp",
+                "object_id": "zehnder_sfp",
+                "unit_of_measurement": "kW/(m³/s)",
+                "state_class": "measurement",
+                "icon": "mdi:speedometer",
+                "value_template": "{{ value_json.metrics.sfp }}",
+            }),
+            ("filter_health", {
+                "name": "Zehnder Filter Health",
+                "unique_id": "zehnder_monitor_filter_health",
+                "object_id": "zehnder_filter_health",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "icon": "mdi:air-filter",
+                "value_template": "{{ value_json.health.score }}",
+            }),
+            ("duty_ratio", {
+                "name": "Zehnder Duty Ratio",
+                "unique_id": "zehnder_monitor_duty_ratio",
+                "object_id": "zehnder_duty_ratio",
+                "state_class": "measurement",
+                "icon": "mdi:arrow-split-vertical",
+                "value_template": "{{ value_json.metrics.duty_ratio }}",
+            }),
+            ("heat_recovery", {
+                "name": "Zehnder Heat Recovery",
+                "unique_id": "zehnder_monitor_heat_recovery",
+                "object_id": "zehnder_heat_recovery",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "icon": "mdi:heat-wave",
+                "value_template": "{{ value_json.metrics.heat_recovery_eta }}",
+            }),
+            ("sfp_trend", {
+                "name": "Zehnder SFP Trend",
+                "unique_id": "zehnder_monitor_sfp_trend",
+                "object_id": "zehnder_sfp_trend",
+                "unit_of_measurement": "mW/(m³/s)/day",
+                "state_class": "measurement",
+                "icon": "mdi:trending-up",
+                "value_template": "{{ (value_json.health.sfp_trend_per_day | float(0) * 1000) | round(2) }}",
+            }),
+        ]
+
+        for key, config in sensors:
+            topic = f"homeassistant/sensor/zehnder_monitor/{key}/config"
+            try:
+                self.call_service(
+                    "mqtt/publish", topic=topic,
+                    payload=json.dumps({**base, **config}), retain=True
+                )
+            except Exception as e:
+                self.log(f"MQTT discovery failed for {key}: {e}", level="WARNING")
+                return False
+        return True
+
     def _publish_mqtt(self, r):
         payload = {
             "timestamp": datetime.now().isoformat(),
@@ -502,7 +573,8 @@ class ZehnderMonitor(hass.Hass):
         self._sample(r)
         self._detect_change(r)
         self._health(r)
-        self._publish_sensors()
+        if not self.discovery_published:
+            self.discovery_published = self._publish_mqtt_discovery()
         self._publish_mqtt(r)
 
         if self.tick_count % 5 == 0:
