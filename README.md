@@ -139,7 +139,7 @@ The monitor only records SFP samples when:
 - Power is **> 20W** (unit actually running)
 - Flow imbalance is **< 10%** (no defrost or anomaly)
 
-Headline SFP, duty ratio, and health score use the median of recent conditioned samples when available. If fewer than five conditioned samples exist after startup, the monitor reports `sample_quality: live_fallback` and temporarily uses the current reading until enough steady-state samples accumulate. This keeps trend comparisons apples-to-apples over weeks and months. *(Note: Because of this highly conditional filtering, AppDaemon handles the 7-day regression internally rather than relying on HA's native `derivative` helper).*
+Headline SFP, duty ratio, and health score use the median of recent conditioned samples when available. Samples are accepted only after multiple consecutive stable ticks at Low or Medium fan level with bypass closed and balanced airflow. If fewer than five conditioned samples exist after startup, the monitor reports `sample_quality: live_fallback`; headline MQTT sensors are marked unavailable so raw telemetry is not mistaken for a filter-health signal. Use `sensor.zehnder_raw_sfp` for live diagnostics while waiting for conditioned samples. This keeps trend comparisons apples-to-apples over weeks and months. *(Note: Because of this highly conditional filtering, AppDaemon handles the 7-day regression internally rather than relying on HA's native `derivative` helper).*
 
 ## Baseline Management
 

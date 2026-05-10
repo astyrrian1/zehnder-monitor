@@ -68,6 +68,9 @@ class ZehnderMonitor(hass.Hass):
     BUFFER_HOURS   = 168    # 7-day conditioned sample window
     HEALTH_HOURS   = 24     # Recent conditioned window for headline metrics
     MIN_HEALTH_SAMPLES = 5
+    STABLE_TICKS_REQUIRED = 3
+    STABILITY_TOLERANCE = 0.08
+    SAMPLE_FAN_LEVELS = ("Low", "Medium")
     STATE_FILE     = "state.json"
     BASELINE_FILE  = "baselines.json"
 
@@ -77,7 +80,7 @@ class ZehnderMonitor(hass.Hass):
 
     def initialize(self):
         self.log("=" * 60)
-        self.log("ZEHNDER MONITOR v1.5.0 -- Physics-Based Filter Health")
+        self.log("ZEHNDER MONITOR v1.6.0 -- Physics-Based Filter Health")
         self.log("=" * 60)
 
         self.sfp = 0.0
@@ -92,6 +95,8 @@ class ZehnderMonitor(hass.Hass):
         self.health_duty_ratio = 1.0
         self.sample_quality = "warming_up"
         self.last_conditioned_sample_at = None
+        self.previous_sample_context = None
+        self.stable_tick_count = 0
 
         self.sfp_buffer = []
         self.ratio_buffer = []
@@ -255,17 +260,13 @@ class ZehnderMonitor(hass.Hass):
     def _sample(self, r):
         """Record metrics only under steady, comparable conditions."""
         now = time.time()
-        fl = r.get("fan_level", "")
-        bp = r.get("bypass", 100)
-        pw = r.get("power", 0)
 
         if r["supply_flow"] < 1:
             return
 
         imbal = abs(r["supply_flow"] - r["exhaust_flow"]) / r["supply_flow"]
 
-        if (fl == "Low" and bp < 5.0 and pw > 20.0
-                and imbal < 0.10 and self.sfp > 0.1):
+        if self._steady_sample_ready(r, imbal):
             self.sfp_buffer.append((now, self.sfp))
             self.ratio_buffer.append((now, self.duty_ratio))
             self.rpm_ratio_buffer.append((now, self.supply_rpm_per_flow))
@@ -305,6 +306,47 @@ class ZehnderMonitor(hass.Hass):
         self.health_sfp = self.sfp
         self.health_duty_ratio = self.duty_ratio
         self.sample_quality = "live_fallback"
+
+    def _steady_sample_ready(self, r, imbal):
+        context = {
+            "fan_level": r.get("fan_level", ""),
+            "supply_flow": r.get("supply_flow"),
+            "exhaust_flow": r.get("exhaust_flow"),
+            "power": r.get("power"),
+        }
+        base_ok = (
+            context["fan_level"] in self.SAMPLE_FAN_LEVELS
+            and r.get("bypass", 100) < 5.0
+            and r.get("power", 0) > 20.0
+            and imbal < 0.10
+            and self.sfp > 0.1
+        )
+        if not base_ok:
+            self.previous_sample_context = context
+            self.stable_tick_count = 0
+            return False
+
+        if self.previous_sample_context is None:
+            self.previous_sample_context = context
+            self.stable_tick_count = 1
+            return False
+
+        stable = (
+            context["fan_level"] == self.previous_sample_context.get("fan_level")
+            and self._within(context["supply_flow"], self.previous_sample_context.get("supply_flow"))
+            and self._within(context["exhaust_flow"], self.previous_sample_context.get("exhaust_flow"))
+            and self._within(context["power"], self.previous_sample_context.get("power"))
+        )
+        self.previous_sample_context = context
+        self.stable_tick_count = self.stable_tick_count + 1 if stable else 1
+        return self.stable_tick_count >= self.STABLE_TICKS_REQUIRED
+
+    def _within(self, current, previous):
+        if current is None or previous is None:
+            return False
+        if abs(previous) < 1e-6:
+            return abs(current) < 1e-6
+        return abs(current - previous) / abs(previous) <= self.STABILITY_TOLERANCE
 
     def _slope(self, buf):
         """Least-squares slope in units-per-day."""
@@ -484,6 +526,8 @@ class ZehnderMonitor(hass.Hass):
                 "state_class": "measurement",
                 "icon": "mdi:speedometer",
                 "value_template": "{{ value_json.metrics.sfp }}",
+                "availability_topic": "zehnder/monitor/state",
+                "availability_template": "{{ 'online' if value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
             }),
             ("filter_health", {
                 "name": "Zehnder Filter Health",
@@ -493,6 +537,8 @@ class ZehnderMonitor(hass.Hass):
                 "state_class": "measurement",
                 "icon": "mdi:air-filter",
                 "value_template": "{{ value_json.health.score }}",
+                "availability_topic": "zehnder/monitor/state",
+                "availability_template": "{{ 'online' if value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
             }),
             ("duty_ratio", {
                 "name": "Zehnder Duty Ratio",
@@ -501,6 +547,8 @@ class ZehnderMonitor(hass.Hass):
                 "state_class": "measurement",
                 "icon": "mdi:arrow-split-vertical",
                 "value_template": "{{ value_json.metrics.duty_ratio }}",
+                "availability_topic": "zehnder/monitor/state",
+                "availability_template": "{{ 'online' if value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
             }),
             ("heat_recovery", {
                 "name": "Zehnder Heat Recovery",
@@ -519,6 +567,8 @@ class ZehnderMonitor(hass.Hass):
                 "state_class": "measurement",
                 "icon": "mdi:trending-up",
                 "value_template": "{{ (value_json.health.sfp_trend_per_day | float(0) * 1000) | round(2) }}",
+                "availability_topic": "zehnder/monitor/state",
+                "availability_template": "{{ 'online' if value_json.health.conditioned_samples | int(0) >= 20 else 'offline' }}",
             }),
             ("sample_quality", {
                 "name": "Zehnder Sample Quality",
