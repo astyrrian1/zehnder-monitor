@@ -54,6 +54,8 @@ Zehnder ComfoAir Q600
 | `sensor.zehnder_sample_quality` | text | Whether headline metrics are conditioned, stale, or live fallback |
 | `sensor.zehnder_conditioned_samples` | count | Number of 7-day conditioned samples feeding the trend |
 | `sensor.zehnder_raw_sfp` | kW/(m³/s) | Instantaneous diagnostic SFP before conditioning |
+| `sensor.zehnder_heat_recovery_quality` | text | Whether heat recovery is based on fresh conditioned temperature samples |
+| `sensor.zehnder_raw_heat_recovery` | % | Instantaneous diagnostic recovery before conditioning/freshness checks |
 
 ## Alert Tiers
 
@@ -140,6 +142,8 @@ The monitor only records SFP samples when:
 - Flow imbalance is **< 10%** (no defrost or anomaly)
 
 Headline SFP, duty ratio, and health score use the median of recent conditioned samples when available. Samples are accepted only after multiple consecutive stable ticks at Low or Medium fan level with bypass closed and balanced airflow. If fewer than five conditioned samples exist after startup, the monitor reports `sample_quality: live_fallback`; headline MQTT sensors are marked unavailable so raw telemetry is not mistaken for a filter-health signal. Use `sensor.zehnder_raw_sfp` for live diagnostics while waiting for conditioned samples. This keeps trend comparisons apples-to-apples over weeks and months. *(Note: Because of this highly conditional filtering, AppDaemon handles the 7-day regression internally rather than relying on HA's native `derivative` helper).*
+
+Heat recovery is stricter: it is only published as a trusted metric when the outdoor, supply, and extract temperature readings are fresh and collected during stable operation. If the Zehnder integration has stale temperature states, `sensor.zehnder_heat_recovery` is marked unavailable and `sensor.zehnder_heat_recovery_quality` reports `unavailable`.
 
 ## Baseline Management
 

@@ -23,7 +23,7 @@ import json
 import os
 import statistics
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class ZehnderMonitor(hass.Hass):
@@ -71,6 +71,7 @@ class ZehnderMonitor(hass.Hass):
     STABLE_TICKS_REQUIRED = 3
     STABILITY_TOLERANCE = 0.08
     SAMPLE_FAN_LEVELS = ("Low", "Medium")
+    TEMP_MAX_AGE_SECONDS = 600
     STATE_FILE     = "state.json"
     BASELINE_FILE  = "baselines.json"
 
@@ -80,7 +81,7 @@ class ZehnderMonitor(hass.Hass):
 
     def initialize(self):
         self.log("=" * 60)
-        self.log("ZEHNDER MONITOR v1.6.0 -- Physics-Based Filter Health")
+        self.log("ZEHNDER MONITOR v1.7.0 -- Physics-Based Filter Health")
         self.log("=" * 60)
 
         self.sfp = 0.0
@@ -89,6 +90,8 @@ class ZehnderMonitor(hass.Hass):
         self.supply_rpm_per_flow = 0.0
         self.exhaust_rpm_per_flow = 0.0
         self.heat_recovery_eta = 0.0
+        self.heat_recovery_raw = None
+        self.heat_recovery_quality = "unavailable"
         self.health_score = 100.0
         self.sfp_trend_slope = 0.0
         self.health_sfp = 0.0
@@ -101,6 +104,7 @@ class ZehnderMonitor(hass.Hass):
         self.sfp_buffer = []
         self.ratio_buffer = []
         self.rpm_ratio_buffer = []
+        self.heat_recovery_buffer = []
 
         self.last_filter_days = None
         self.baseline_timer = None
@@ -157,6 +161,7 @@ class ZehnderMonitor(hass.Hass):
             "sfp_buffer": [(t, v) for t, v in self.sfp_buffer if t > cutoff],
             "ratio_buffer": [(t, v) for t, v in self.ratio_buffer if t > cutoff],
             "rpm_ratio_buffer": [(t, v) for t, v in self.rpm_ratio_buffer if t > cutoff],
+            "heat_recovery_buffer": [(t, v) for t, v in self.heat_recovery_buffer if t > cutoff],
             "last_filter_days": self.last_filter_days,
             "last_conditioned_sample_at": self.last_conditioned_sample_at,
             "saved_at": datetime.now().isoformat(),
@@ -168,6 +173,7 @@ class ZehnderMonitor(hass.Hass):
         self.sfp_buffer = s.get("sfp_buffer", [])
         self.ratio_buffer = s.get("ratio_buffer", [])
         self.rpm_ratio_buffer = s.get("rpm_ratio_buffer", [])
+        self.heat_recovery_buffer = s.get("heat_recovery_buffer", [])
         self.last_filter_days = s.get("last_filter_days")
         self.last_conditioned_sample_at = s.get("last_conditioned_sample_at")
 
@@ -183,6 +189,24 @@ class ZehnderMonitor(hass.Hass):
             return float(v)
         except (ValueError, TypeError):
             return default
+
+    def _age_seconds(self, eid):
+        try:
+            data = self.get_state(eid, attribute="all")
+            stamp = (
+                data.get("last_reported")
+                or data.get("last_updated")
+                or data.get("last_changed")
+            )
+            if not stamp:
+                return None
+            ts = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            now = datetime.now(ts.tzinfo or timezone.utc)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return max(0, (now - ts).total_seconds())
+        except Exception:
+            return None
 
     def _s(self, eid, default=""):
         v = self.get_state(eid)
@@ -206,6 +230,12 @@ class ZehnderMonitor(hass.Hass):
         r["outdoor_temp"]= self._f(self.E["outdoor_temp"])
         r["extract_temp"]= self._f(self.E["extract_temp"])
         r["exhaust_temp"]= self._f(self.E["exhaust_temp"])
+        r["temp_ages"]   = {
+            "supply_temp": self._age_seconds(self.E["supply_temp"]),
+            "outdoor_temp": self._age_seconds(self.E["outdoor_temp"]),
+            "extract_temp": self._age_seconds(self.E["extract_temp"]),
+            "exhaust_temp": self._age_seconds(self.E["exhaust_temp"]),
+        }
         r["wifi"]        = self._f(self.E["wifi"])
         r["energy_ytd"]  = self._f(self.E["energy_ytd"])
         r["avoided_heat"]= self._f(self.E["avoided_heat"])
@@ -245,13 +275,23 @@ class ZehnderMonitor(hass.Hass):
             if r["exhaust_flow"] and r["exhaust_flow"] > 10 else 0.0
         )
 
-        # Heat recovery eta (only valid with bypass off and meaningful dT)
+        # Heat recovery is only meaningful from fresh, synchronous temperatures.
+        self.heat_recovery_raw = None
         if (r["supply_temp"] is not None and r["outdoor_temp"] is not None
                 and r["extract_temp"] is not None):
             dt = r["extract_temp"] - r["outdoor_temp"]
-            if r["bypass"] < 5.0 and abs(dt) > 5.0:
+            if (r["bypass"] < 5.0 and abs(dt) > 5.0
+                    and self._temperatures_fresh(r)):
                 eta = ((r["supply_temp"] - r["outdoor_temp"]) / dt) * 100.0
-                self.heat_recovery_eta = max(0.0, min(120.0, eta))
+                self.heat_recovery_raw = max(0.0, min(120.0, eta))
+
+    def _temperatures_fresh(self, r):
+        ages = r.get("temp_ages", {})
+        required = ("supply_temp", "outdoor_temp", "extract_temp")
+        return all(
+            ages.get(k) is not None and ages[k] <= self.TEMP_MAX_AGE_SECONDS
+            for k in required
+        )
 
     # =================================================================
     # CONDITIONED SAMPLING
@@ -270,6 +310,8 @@ class ZehnderMonitor(hass.Hass):
             self.sfp_buffer.append((now, self.sfp))
             self.ratio_buffer.append((now, self.duty_ratio))
             self.rpm_ratio_buffer.append((now, self.supply_rpm_per_flow))
+            if self.heat_recovery_raw is not None:
+                self.heat_recovery_buffer.append((now, self.heat_recovery_raw))
             self.last_conditioned_sample_at = now
 
         # Prune to window
@@ -277,6 +319,9 @@ class ZehnderMonitor(hass.Hass):
         self.sfp_buffer = [(t, v) for t, v in self.sfp_buffer if t > cutoff]
         self.ratio_buffer = [(t, v) for t, v in self.ratio_buffer if t > cutoff]
         self.rpm_ratio_buffer = [(t, v) for t, v in self.rpm_ratio_buffer if t > cutoff]
+        self.heat_recovery_buffer = [
+            (t, v) for t, v in self.heat_recovery_buffer if t > cutoff
+        ]
 
         self._conditioned_metrics(now)
         self.sfp_trend_slope = (
@@ -290,22 +335,38 @@ class ZehnderMonitor(hass.Hass):
     def _conditioned_metrics(self, now):
         sfp_recent = self._recent_values(self.sfp_buffer, now, self.HEALTH_HOURS)
         ratio_recent = self._recent_values(self.ratio_buffer, now, self.HEALTH_HOURS)
+        heat_recent = self._recent_values(
+            self.heat_recovery_buffer, now, self.HEALTH_HOURS
+        )
 
         if len(sfp_recent) >= self.MIN_HEALTH_SAMPLES:
             self.health_sfp = statistics.median(sfp_recent)
             self.health_duty_ratio = statistics.median(ratio_recent)
             self.sample_quality = "conditioned"
+            if len(heat_recent) >= self.MIN_HEALTH_SAMPLES:
+                self.heat_recovery_eta = statistics.median(heat_recent)
+                self.heat_recovery_quality = "conditioned"
+            else:
+                self.heat_recovery_quality = "unavailable"
             return
 
         if len(self.sfp_buffer) >= self.MIN_HEALTH_SAMPLES:
             self.health_sfp = statistics.median(v for _, v in self.sfp_buffer)
             self.health_duty_ratio = statistics.median(v for _, v in self.ratio_buffer)
             self.sample_quality = "conditioned_stale"
+            if len(self.heat_recovery_buffer) >= self.MIN_HEALTH_SAMPLES:
+                self.heat_recovery_eta = statistics.median(
+                    v for _, v in self.heat_recovery_buffer
+                )
+                self.heat_recovery_quality = "conditioned_stale"
+            else:
+                self.heat_recovery_quality = "unavailable"
             return
 
         self.health_sfp = self.sfp
         self.health_duty_ratio = self.duty_ratio
         self.sample_quality = "live_fallback"
+        self.heat_recovery_quality = "unavailable"
 
     def _steady_sample_ready(self, r, imbal):
         context = {
@@ -558,6 +619,8 @@ class ZehnderMonitor(hass.Hass):
                 "state_class": "measurement",
                 "icon": "mdi:heat-wave",
                 "value_template": "{{ value_json.metrics.heat_recovery_eta }}",
+                "availability_topic": "zehnder/monitor/state",
+                "availability_template": "{{ 'online' if value_json.metrics.heat_recovery_quality == 'conditioned' else 'offline' }}",
             }),
             ("sfp_trend", {
                 "name": "Zehnder SFP Trend",
@@ -594,6 +657,22 @@ class ZehnderMonitor(hass.Hass):
                 "icon": "mdi:pulse",
                 "value_template": "{{ value_json.raw.sfp }}",
             }),
+            ("raw_heat_recovery", {
+                "name": "Zehnder Raw Heat Recovery",
+                "unique_id": "zehnder_monitor_raw_heat_recovery",
+                "default_entity_id": "sensor.zehnder_raw_heat_recovery",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "icon": "mdi:heat-wave",
+                "value_template": "{{ value_json.raw.heat_recovery_eta }}",
+            }),
+            ("heat_recovery_quality", {
+                "name": "Zehnder Heat Recovery Quality",
+                "unique_id": "zehnder_monitor_heat_recovery_quality",
+                "default_entity_id": "sensor.zehnder_heat_recovery_quality",
+                "icon": "mdi:thermometer-check",
+                "value_template": "{{ value_json.metrics.heat_recovery_quality }}",
+            }),
         ]
 
         for key, config in sensors:
@@ -620,6 +699,7 @@ class ZehnderMonitor(hass.Hass):
                 "supply_rpm_per_flow": round(self.supply_rpm_per_flow, 3),
                 "exhaust_rpm_per_flow": round(self.exhaust_rpm_per_flow, 3),
                 "heat_recovery_eta": round(self.heat_recovery_eta, 1),
+                "heat_recovery_quality": self.heat_recovery_quality,
             },
             "health": {
                 "score": self.health_score, "status": self._health_l(),
@@ -631,6 +711,10 @@ class ZehnderMonitor(hass.Hass):
             "raw": {
                 "sfp": round(self.sfp, 4),
                 "duty_ratio": round(self.duty_ratio, 3),
+                "heat_recovery_eta": (
+                    round(self.heat_recovery_raw, 1)
+                    if self.heat_recovery_raw is not None else None
+                ),
                 "power_w": r.get("power"),
                 "supply_flow": r.get("supply_flow"),
                 "exhaust_flow": r.get("exhaust_flow"),
@@ -643,6 +727,7 @@ class ZehnderMonitor(hass.Hass):
                 "filter_days": r.get("filter_days"),
                 "wifi_dbm": r.get("wifi"),
                 "energy_ytd_kwh": r.get("energy_ytd"),
+                "temp_age_seconds": r.get("temp_ages", {}),
             },
             "baselines": self.baselines,
         }
