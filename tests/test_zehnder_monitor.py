@@ -164,6 +164,7 @@ class MonitorIntegrationTests(unittest.TestCase):
     def make_monitor(self):
         mon = ZehnderMonitor.__new__(ZehnderMonitor)
         mon.baseline_candidate_buffer = []
+        mon.args = {}
         mon.log = lambda *args, **kwargs: None
         return mon
 
@@ -228,7 +229,7 @@ class MonitorIntegrationTests(unittest.TestCase):
         mon = self.make_monitor()
         now = time.time()
         with tempfile.TemporaryDirectory() as tmp:
-            mon._dir = lambda: tmp
+            mon._data_dir = lambda: tmp
             mon.sfp_buffer = [(now - (25 * 3600), 0.55), (now - (169 * 3600), 0.6)]
             mon.ratio_buffer = [(now - (25 * 3600), 1.2), (now - (169 * 3600), 1.3)]
             mon.rpm_ratio_buffer = [(now - (25 * 3600), 8.0)]
@@ -267,7 +268,7 @@ class MonitorIntegrationTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmp:
-            mon._dir = lambda: tmp
+            mon._data_dir = lambda: tmp
             mon._maybe_promote_conditioned_baseline("Medium")
 
             with open(pathlib.Path(tmp) / "baselines.json", "r") as f:
@@ -277,6 +278,49 @@ class MonitorIntegrationTests(unittest.TestCase):
         self.assertEqual(baseline["baseline_quality"], "conditioned")
         self.assertEqual(baseline["sample_count"], mon.BASELINE_MIN_CONDITIONED_SAMPLES)
         self.assertEqual(saved["baseline_quality"], "conditioned")
+
+    def test_default_data_dir_lives_outside_hacs_app_directory(self):
+        mon = self.make_monitor()
+        mon._dir = lambda: "/homeassistant/appdaemon/apps/zehnder-monitor"
+
+        self.assertEqual(
+            mon._data_dir(),
+            "/homeassistant/appdaemon/zehnder-monitor",
+        )
+
+    def test_relative_configured_data_dir_is_appdaemon_config_relative(self):
+        mon = self.make_monitor()
+        mon.args = {"data_dir": "runtime/zehnder"}
+        mon._dir = lambda: "/homeassistant/appdaemon/apps/zehnder-monitor"
+
+        self.assertEqual(
+            mon._data_dir(),
+            "/homeassistant/appdaemon/runtime/zehnder",
+        )
+
+    def test_load_json_migrates_legacy_app_directory_file_to_data_dir(self):
+        mon = self.make_monitor()
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = pathlib.Path(tmp) / "apps" / "zehnder-monitor"
+            data_dir = pathlib.Path(tmp) / "zehnder-monitor"
+            legacy.mkdir(parents=True)
+            mon._dir = lambda: str(legacy)
+            mon._data_dir = lambda: str(data_dir)
+
+            legacy_baseline = {
+                "sfp": 0.5575,
+                "duty_ratio": 1.231,
+                "captured_at": "2026-05-18T12:36:53.461672",
+            }
+            with open(legacy / "baselines.json", "w") as f:
+                json.dump(legacy_baseline, f)
+
+            loaded = mon._load_json("baselines.json", mon._defaults())
+
+            self.assertEqual(loaded["sfp"], 0.5575)
+            with open(data_dir / "baselines.json", "r") as f:
+                migrated = json.load(f)
+            self.assertEqual(migrated["duty_ratio"], 1.231)
 
     def test_mqtt_discovery_preserves_existing_unique_ids_and_adds_only_new_sensors(self):
         mon = self.make_monitor()
