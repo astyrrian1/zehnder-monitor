@@ -1,28 +1,35 @@
 blueprint:
-  name: "Zehnder Filter Health Alert"
+  name: "Zehnder Filter Capability Alert"
   description: >
-    Sends a notification when the Zehnder filter health score drops below a
-    configured threshold. Create one automation instance per alert tier:
+    Sends a notification when the Zehnder baseline-aware filter capacity drops
+    below a configured threshold. Create one automation instance per alert tier:
 
-    - **Advisory** (threshold: 60, cooldown: 24h) — filters are aging
+    - **Advisory** (threshold: 60, cooldown: 24h) — capacity is declining
     - **Warning** (threshold: 30, cooldown: 6h) — plan a replacement
-    - **Critical** (threshold: 10, cooldown: 1h) — replace immediately
+    - **Critical** (threshold: 10, cooldown: 1h) — replace filters or inspect intake/exhaust restriction
+
+    The default trigger uses the v1.8 baseline-aware Filter Capacity Remaining
+    sensor. Existing automations can continue to point this input at the legacy
+    Filter Health sensor if you want absolute/generic performance alerts.
 
     Requires the Zehnder Monitor AppDaemon app to be running.
   domain: automation
   source_url: https://github.com/astyrrian1/zehnder-monitor/blob/main/blueprints/automation/zehnder_filter_alert.yaml
   input:
     health_sensor:
-      name: Filter Health Sensor
-      description: The Zehnder filter health sensor entity.
-      default: sensor.zehnder_filter_health
+      name: Alert Sensor
+      description: >
+        Sensor that drives the alert threshold. Recommended: Filter Capacity
+        Remaining for actionable baseline-aware filter-loading alerts. Select
+        Filter Health to preserve the legacy absolute/generic alert behavior.
+      default: sensor.zehnder_filter_capacity_remaining
       selector:
         entity:
           domain: sensor
     threshold:
-      name: Health Threshold
+      name: Alert Threshold
       description: >
-        Alert when filter health drops below this value.
+        Alert when the selected alert sensor drops below this value.
         Recommended: 60 (advisory), 30 (warning), 10 (critical).
       default: 30
       selector:
@@ -67,6 +74,74 @@ blueprint:
             - "notify.notify"
             - "notify.mobile_app"
           custom_value: true
+    absolute_health_sensor:
+      name: Absolute Filter Health Sensor
+      description: >
+        Existing Zehnder Filter Health sensor. Used as context in notifications;
+        this keeps the legacy absolute/generic score visible.
+      default: sensor.zehnder_filter_health
+      selector:
+        entity:
+          domain: sensor
+    filter_capacity_sensor:
+      name: Filter Capacity Sensor
+      description: Baseline-aware filter capacity remaining sensor from the MQTT contract.
+      default: sensor.zehnder_filter_capacity_remaining
+      selector:
+        entity:
+          domain: sensor
+    baseline_quality_sensor:
+      name: Baseline Quality Sensor
+      description: >
+        Baseline quality sensor from the MQTT contract. Notifications include
+        this so capacity alerts can distinguish conditioned, single-sample,
+        fallback, invalid, or learning baselines.
+      default: sensor.zehnder_baseline_quality
+      selector:
+        entity:
+          domain: sensor
+    sfp_capacity_sensor:
+      name: SFP Capacity Sensor
+      description: SFP-only remaining capacity sensor from the MQTT contract.
+      default: sensor.zehnder_sfp_capacity_remaining
+      selector:
+        entity:
+          domain: sensor
+    duty_capacity_sensor:
+      name: Duty Capacity Sensor
+      description: Duty-ratio-only remaining capacity sensor from the MQTT contract.
+      default: sensor.zehnder_duty_capacity_remaining
+      selector:
+        entity:
+          domain: sensor
+    baseline_system_resistance_sensor:
+      name: Baseline System Resistance Sensor
+      description: Inferred clean-filter system resistance sensor from the MQTT contract.
+      default: sensor.zehnder_baseline_system_resistance
+      selector:
+        entity:
+          domain: sensor
+    sfp_sensor:
+      name: Trusted SFP Sensor
+      description: Trusted SFP sensor from the MQTT contract.
+      default: sensor.zehnder_sfp
+      selector:
+        entity:
+          domain: sensor
+    duty_ratio_sensor:
+      name: Trusted Duty Ratio Sensor
+      description: Trusted duty ratio sensor from the MQTT contract.
+      default: sensor.zehnder_duty_ratio
+      selector:
+        entity:
+          domain: sensor
+    sample_quality_sensor:
+      name: Sample Quality Sensor
+      description: Sample quality sensor from the MQTT contract.
+      default: sensor.zehnder_sample_quality
+      selector:
+        entity:
+          domain: sensor
 
 mode: single
 
@@ -79,14 +154,32 @@ trigger:
 
 action:
   - variables:
+      alert_sensor: !input health_sensor
+      absolute_health_sensor: !input absolute_health_sensor
+      filter_capacity_sensor: !input filter_capacity_sensor
+      baseline_quality_sensor: !input baseline_quality_sensor
+      sfp_capacity_sensor: !input sfp_capacity_sensor
+      duty_capacity_sensor: !input duty_capacity_sensor
+      baseline_system_resistance_sensor: !input baseline_system_resistance_sensor
+      sfp_sensor: !input sfp_sensor
+      duty_ratio_sensor: !input duty_ratio_sensor
+      sample_quality_sensor: !input sample_quality_sensor
       severity: !input severity
       threshold: !input threshold
       notify_target: !input notify_service
-      health: "{{ states('sensor.zehnder_filter_health') }}"
-      sfp: "{{ states('sensor.zehnder_sfp') }}"
-      sfp_class: "{{ state_attr('sensor.zehnder_sfp', 'sfp_class') }}"
-      duty_ratio: "{{ states('sensor.zehnder_duty_ratio') }}"
-      status: "{{ state_attr('sensor.zehnder_filter_health', 'status') }}"
+      alert_name: "{{ state_attr(alert_sensor, 'friendly_name') or alert_sensor }}"
+      alert_value: "{{ states(alert_sensor) }}"
+      absolute_health: "{{ states(absolute_health_sensor) }}"
+      filter_capacity: "{{ states(filter_capacity_sensor) }}"
+      status: "{{ state_attr(absolute_health_sensor, 'status') }}"
+      baseline_quality: "{{ states(baseline_quality_sensor) }}"
+      sfp_capacity: "{{ states(sfp_capacity_sensor) }}"
+      duty_capacity: "{{ states(duty_capacity_sensor) }}"
+      baseline_system_resistance: "{{ states(baseline_system_resistance_sensor) }}"
+      sfp: "{{ states(sfp_sensor) }}"
+      sfp_class: "{{ state_attr(sfp_sensor, 'sfp_class') }}"
+      duty_ratio: "{{ states(duty_ratio_sensor) }}"
+      sample_quality: "{{ states(sample_quality_sensor) }}"
 
   - choose:
       - conditions:
@@ -97,18 +190,24 @@ action:
             data:
               title: "🌀 Zehnder Filter {{ severity }}"
               message: >
-                Filter health is **{{ health }}%** ({{ status }}).
+                {{ alert_name }} is **{{ alert_value }}%**, below the {{ threshold }}% {{ severity | lower }} threshold.
 
-                - SFP: {{ sfp }} kW/(m³/s) — {{ sfp_class }}
-                - Duty ratio: {{ duty_ratio }}x
-                - Threshold: {{ threshold }}%
+                - Filter capacity: {{ filter_capacity }}%
+                - Absolute health: {{ absolute_health }}% ({{ status }})
+                - Baseline quality: {{ baseline_quality }}
+                - SFP capacity: {{ sfp_capacity }}%
+                - Duty capacity: {{ duty_capacity }}%
+                - Baseline system resistance: {{ baseline_system_resistance }}%
+                - Trusted SFP: {{ sfp }} kW/(m³/s) — {{ sfp_class }}
+                - Trusted duty ratio: {{ duty_ratio }}x
+                - Sample quality: {{ sample_quality }}
 
                 {% if severity == 'Critical' %}
-                **Replace filters now.** High SFP wastes energy and reduces airflow.
+                **Replace filters now or inspect for intake/exhaust restriction.** Capacity is in the critical range after accounting for the clean-filter baseline system resistance.
                 {% elif severity == 'Warning' %}
-                Plan a filter replacement soon.
+                Plan a filter replacement soon and watch whether SFP or duty capacity is the limiting factor.
                 {% else %}
-                Filters are aging — monitor over the next week.
+                Capacity is declining — monitor the trend over the next week.
                 {% endif %}
               notification_id: "zehnder_filter_{{ severity | lower }}"
     default:
@@ -116,11 +215,18 @@ action:
         data:
           title: "🌀 Zehnder Filter {{ severity }}"
           message: >
-            Filter health is {{ health }}% ({{ status }}).
-            SFP: {{ sfp }} ({{ sfp_class }}), Duty ratio: {{ duty_ratio }}x.
-            {% if severity == 'Critical' %}Replace filters now.
+            {{ alert_name }} is {{ alert_value }}%, below {{ threshold }}%.
+            Capacity: {{ filter_capacity }}%;
+            absolute health: {{ absolute_health }}% ({{ status }});
+            baseline: {{ baseline_quality }};
+            SFP capacity: {{ sfp_capacity }}%;
+            duty capacity: {{ duty_capacity }}%;
+            system resistance: {{ baseline_system_resistance }}%;
+            SFP: {{ sfp }} ({{ sfp_class }});
+            duty ratio: {{ duty_ratio }}x.
+            {% if severity == 'Critical' %}Replace filters now or inspect for intake/exhaust restriction.
             {% elif severity == 'Warning' %}Plan a filter replacement soon.
-            {% else %}Filters are aging — monitor over the next week.{% endif %}
+            {% else %}Capacity is declining — monitor over the next week.{% endif %}
           data:
             tag: "zehnder_filter_{{ severity | lower }}"
 
