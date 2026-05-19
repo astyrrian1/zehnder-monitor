@@ -102,7 +102,7 @@ class ZehnderMonitor(hass.Hass):
 
     def initialize(self):
         self.log("=" * 60)
-        self.log("ZEHNDER MONITOR v1.7.0 -- Physics-Based Filter Health")
+        self.log("ZEHNDER MONITOR v1.8.0 -- Physics-Based Filter Health")
         self.log("=" * 60)
 
         self.sfp = 0.0
@@ -267,18 +267,21 @@ class ZehnderMonitor(hass.Hass):
         if self._valid_baseline(fan_baseline):
             return fan_baseline, fan_baseline.get("baseline_quality", "single_sample")
 
-        if self._valid_baseline(self.baselines):
-            quality = (
-                self.baselines.get("baseline_quality")
-                or self.baselines.get("quality")
-                or ("single_sample" if self.baselines.get("captured_at") else "fallback")
-            )
-            return self.baselines, quality
-
         learning = any(
             sample.get("fan_level") == fan_level
             for sample in self.baseline_candidate_buffer
         )
+
+        if self._valid_baseline(self.baselines):
+            quality = (
+                self.baselines.get("baseline_quality")
+                or self.baselines.get("quality")
+                or ("single_sample" if self.baselines.get("captured_at") else None)
+            )
+            if quality is None:
+                quality = "learning" if learning else "fallback"
+            return self.baselines, quality
+
         return self._defaults(), "learning" if learning else "invalid"
 
     def _baseline_capability(self, r):
