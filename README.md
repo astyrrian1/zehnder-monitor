@@ -77,15 +77,19 @@ AppDaemon outputs raw scores. Alerting is handled by a **blueprint** — a reusa
    https://github.com/astyrrian1/zehnder-monitor/blob/main/blueprints/automation/zehnder_filter_alert.yaml
    ```
 
-2. **Create three automations** from the blueprint (Settings → Automations → Create → Use Blueprint):
+2. **Create three automations** from the blueprint (Settings → Automations → Create → Use Blueprint).
+   The default alert sensor is `sensor.zehnder_filter_capacity_remaining`, the
+   baseline-aware post-clean-filter capability metric. If you want the original
+   absolute/generic behavior, select `sensor.zehnder_filter_health` for the alert
+   sensor.
 
    | Tier | Threshold | Cooldown | What It Means |
    |---|---|---|---|
-   | **Advisory** | 60% | 24 hours | Filters aging — keep an eye on it |
+   | **Advisory** | 60% | 24 hours | Filter capacity declining — keep an eye on it |
    | **Warning** | 30% | 6 hours | Plan a replacement soon |
-   | **Critical** | 10% | 1 hour | Replace immediately — energy waste and reduced airflow |
+   | **Critical** | 10% | 1 hour | Replace filters or inspect intake/exhaust restriction |
 
-   For each, select your preferred notification target (persistent notification, mobile app, etc.).
+   For each, select your preferred notification target (persistent notification, mobile app, etc.). Notifications include baseline quality, SFP capacity, duty capacity, inferred baseline system resistance, absolute filter health, trusted SFP, and trusted duty ratio.
 
 ## Installation
 
