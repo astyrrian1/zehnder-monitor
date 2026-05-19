@@ -127,6 +127,38 @@ class CapabilityMathTests(unittest.TestCase):
         self.assertIsNone(cap["sfp_capacity_remaining"])
         self.assertEqual(cap["baseline_quality"], "fallback")
 
+    def test_invalid_baseline_threshold_does_not_publish_capacity_numbers(self):
+        cap = capability.compute_capability(
+            current_sfp=0.55,
+            current_ratio=1.25,
+            baseline_sfp=0.81,
+            baseline_ratio=1.50,
+            sfp_pristine=0.35,
+            sfp_replace=0.80,
+            ratio_replace=2.50,
+            baseline_quality="single_sample",
+        )
+
+        self.assertIsNone(cap["filter_capacity_remaining"])
+        self.assertIsNone(cap["sfp_capacity_remaining"])
+        self.assertIsNotNone(cap["duty_capacity_remaining"])
+
+    def test_missing_current_metric_does_not_publish_composite_capacity(self):
+        cap = capability.compute_capability(
+            current_sfp=None,
+            current_ratio=1.25,
+            baseline_sfp=0.5575,
+            baseline_ratio=1.231,
+            sfp_pristine=0.35,
+            sfp_replace=0.80,
+            ratio_replace=2.50,
+            baseline_quality="single_sample",
+        )
+
+        self.assertIsNone(cap["filter_capacity_remaining"])
+        self.assertIsNone(cap["sfp_capacity_remaining"])
+        self.assertIsNotNone(cap["duty_capacity_remaining"])
+
 
 class MonitorIntegrationTests(unittest.TestCase):
     def make_monitor(self):
@@ -162,6 +194,35 @@ class MonitorIntegrationTests(unittest.TestCase):
         )
         self.assertGreaterEqual(cap["filter_capacity_remaining"], 99.0)
         self.assertEqual(cap["baseline_quality"], "single_sample")
+
+    def test_missing_baseline_reports_learning_when_clean_samples_are_accumulating(self):
+        mon = self.make_monitor()
+        mon.baselines = mon._defaults()
+        mon.baseline_candidate_buffer = [{"fan_level": "Medium"}]
+        mon.health_sfp = 0.5543
+        mon.health_duty_ratio = 1.249
+
+        cap = mon._baseline_capability({"fan_level": "Medium"})
+
+        self.assertEqual(cap["baseline_quality"], "learning")
+        self.assertIsNone(cap["filter_capacity_remaining"])
+
+    def test_invalid_baseline_reports_invalid_quality(self):
+        mon = self.make_monitor()
+        mon.baselines = {
+            "version": 2,
+            "sfp": 0.82,
+            "duty_ratio": 1.231,
+            "captured_at": "2026-05-18T12:36:53.461672",
+            "per_fan_level": {},
+        }
+        mon.health_sfp = 0.5543
+        mon.health_duty_ratio = 1.249
+
+        cap = mon._baseline_capability({"fan_level": "Medium"})
+
+        self.assertEqual(cap["baseline_quality"], "invalid")
+        self.assertIsNone(cap["filter_capacity_remaining"])
 
     def test_persistence_keeps_full_168_hour_trend_window(self):
         mon = self.make_monitor()
@@ -255,6 +316,59 @@ class MonitorIntegrationTests(unittest.TestCase):
 
         for key, unique_id in expected_new.items():
             self.assertEqual(published[key]["unique_id"], unique_id)
+
+    def test_mqtt_payload_preserves_existing_sections_and_adds_capability(self):
+        mon = self.make_monitor()
+        published = {}
+        mon.health_sfp = 0.5543
+        mon.health_duty_ratio = 1.249
+        mon.duty_asymmetry_abs = 12.8
+        mon.supply_rpm_per_flow = 8.024
+        mon.exhaust_rpm_per_flow = 7.1
+        mon.heat_recovery_eta = 90.0
+        mon.heat_recovery_quality = "conditioned"
+        mon.health_score = 76.2
+        mon.sfp_trend_slope = 0.0001
+        mon.sfp_buffer = [(time.time(), 0.5543)]
+        mon.sample_quality = "conditioned"
+        mon.last_conditioned_sample_at = time.time()
+        mon.sfp = 0.5328
+        mon.duty_ratio = 1.249
+        mon.heat_recovery_raw = 89.0
+        mon.capability = {
+            "filter_capacity_remaining": 99.5,
+            "baseline_quality": "single_sample",
+        }
+        mon.baselines = {"version": 2, "sfp": 0.5575}
+
+        def call_service(service, **kwargs):
+            self.assertEqual(service, "mqtt/publish")
+            published.update(json.loads(kwargs["payload"]))
+
+        mon.call_service = call_service
+        mon._publish_mqtt({
+            "power": 80.0,
+            "supply_flow": 270.0,
+            "exhaust_flow": 270.0,
+            "supply_duty": 68.5,
+            "exhaust_duty": 55.7,
+            "supply_rpm": 2166.0,
+            "exhaust_rpm": 1917.0,
+            "fan_level": "Medium",
+            "bypass": 0.0,
+            "filter_days": 180.0,
+            "wifi": -52.0,
+            "energy_ytd": 100.0,
+            "temp_ages": {},
+        })
+
+        self.assertIn("metrics", published)
+        self.assertIn("health", published)
+        self.assertIn("raw", published)
+        self.assertIn("baselines", published)
+        self.assertEqual(
+            published["capability"]["filter_capacity_remaining"], 99.5
+        )
 
 
 if __name__ == "__main__":
