@@ -56,6 +56,11 @@ Zehnder ComfoAir Q600
 | `sensor.zehnder_raw_sfp` | kW/(m³/s) | Instantaneous diagnostic SFP before conditioning |
 | `sensor.zehnder_heat_recovery_quality` | text | Whether heat recovery is based on fresh conditioned temperature samples |
 | `sensor.zehnder_raw_heat_recovery` | % | Instantaneous diagnostic recovery before conditioning/freshness checks |
+| `sensor.zehnder_filter_capacity_remaining` | % | Clean-baseline-normalized filter capacity remaining |
+| `sensor.zehnder_sfp_capacity_remaining` | % | SFP-only capacity remaining relative to the clean baseline |
+| `sensor.zehnder_duty_capacity_remaining` | % | Duty-ratio-only capacity remaining relative to the clean baseline |
+| `sensor.zehnder_baseline_system_resistance` | % | Inferred clean-filter system resistance on the generic SFP envelope |
+| `sensor.zehnder_baseline_quality` | text | Baseline source quality: conditioned, single_sample, fallback, invalid, or learning |
 
 ## Alert Tiers
 
@@ -149,7 +154,24 @@ Heat recovery is stricter: it is only published as a trusted metric when the out
 
 Baselines are captured automatically when a filter change is detected (the countdown timer jumps by >90 days). After detection, the system waits 2 hours for stabilisation before recording.
 
-Baselines persist in `baselines.json` alongside the app.
+Baselines persist in `baselines.json` alongside the app. Existing baseline files are migrated internally and remain valid, including single-sample clean-filter captures. When enough stable clean-filter samples are available at a fan level, the monitor stores a conditioned per-fan-level baseline and uses it for capability metrics.
+
+## Baseline-Aware Capacity
+
+`sensor.zehnder_filter_health` is preserved as the existing absolute/generic performance health score for compatibility with dashboards and alert automations.
+
+`sensor.zehnder_filter_capacity_remaining` is additive. It answers a different question: how much filter capacity remains after accounting for this home's clean-filter baseline system resistance and normal external static pressure load?
+
+```
+SFP_capacity  = (SFP_REPLACE - current_SFP) / (SFP_REPLACE - baseline_SFP) * 100
+Duty_capacity = (RATIO_REPLACE - current_ratio) / (RATIO_REPLACE - baseline_ratio) * 100
+
+Filter_capacity = (SFP_capacity * 0.65) + (Duty_capacity * 0.35)
+```
+
+Capacity is clamped to 0-100%. Better-than-baseline readings cap at 100%, so a correct filter replacement should report near 100% after the clean baseline has been captured. If the monitor only has fallback or invalid baseline data, the new capacity sensors are marked unavailable rather than publishing misleading values.
+
+`sensor.zehnder_baseline_system_resistance` expresses the captured clean-filter SFP baseline on the generic SFP health envelope. This is an inferred context metric from fan, power, and flow telemetry; the app does not directly measure duct static pressure.
 
 ## Health Score Formula
 
@@ -178,6 +200,13 @@ Published to `zehnder/monitor/state` (retained) every 60 seconds:
     "status": "Good",
     "sfp_trend_per_day": 0.000312,
     "conditioned_samples": 847
+  },
+  "capability": {
+    "filter_capacity_remaining": 99.5,
+    "sfp_capacity_remaining": 100.0,
+    "duty_capacity_remaining": 98.6,
+    "baseline_system_resistance": 46.1,
+    "baseline_quality": "single_sample"
   },
   "raw": { ... },
   "baselines": { ... }

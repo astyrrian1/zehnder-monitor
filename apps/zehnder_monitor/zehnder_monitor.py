@@ -23,7 +23,24 @@ import json
 import os
 import statistics
 import time
+import importlib.util
 from datetime import datetime, timezone
+
+try:
+    from capability import compute_capability
+except ImportError:
+    try:
+        from .capability import compute_capability
+    except ImportError:
+        _capability_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "capability.py"
+        )
+        _capability_spec = importlib.util.spec_from_file_location(
+            "zehnder_monitor_capability", _capability_path
+        )
+        _capability_module = importlib.util.module_from_spec(_capability_spec)
+        _capability_spec.loader.exec_module(_capability_module)
+        compute_capability = _capability_module.compute_capability
 
 
 class ZehnderMonitor(hass.Hass):
@@ -72,6 +89,10 @@ class ZehnderMonitor(hass.Hass):
     STABILITY_TOLERANCE = 0.08
     SAMPLE_FAN_LEVELS = ("Low", "Medium")
     TEMP_MAX_AGE_SECONDS = 600
+    BASELINE_VERSION = 2
+    BASELINE_MIN_CONDITIONED_SAMPLES = 20
+    BASELINE_CANDIDATE_HOURS = 24
+    BASELINE_LEARNING_MIN_DAYS = FILTER_CYCLE - 14
     STATE_FILE     = "state.json"
     BASELINE_FILE  = "baselines.json"
 
@@ -96,6 +117,7 @@ class ZehnderMonitor(hass.Hass):
         self.sfp_trend_slope = 0.0
         self.health_sfp = 0.0
         self.health_duty_ratio = 1.0
+        self.capability = {}
         self.sample_quality = "warming_up"
         self.last_conditioned_sample_at = None
         self.previous_sample_context = None
@@ -105,13 +127,17 @@ class ZehnderMonitor(hass.Hass):
         self.ratio_buffer = []
         self.rpm_ratio_buffer = []
         self.heat_recovery_buffer = []
+        self.baseline_candidate_buffer = []
 
         self.last_filter_days = None
         self.baseline_timer = None
         self.tick_count = 0
         self.discovery_published = False
 
-        self.baselines = self._load_json(self.BASELINE_FILE, self._defaults())
+        loaded_baselines = self._load_json(self.BASELINE_FILE, self._defaults())
+        self.baselines = self._migrate_baselines(loaded_baselines)
+        if self.baselines != loaded_baselines:
+            self._save_json(self.BASELINE_FILE, self.baselines)
         saved = self._load_json(self.STATE_FILE, {})
         self._restore(saved)
 
@@ -130,10 +156,12 @@ class ZehnderMonitor(hass.Hass):
 
     def _defaults(self):
         return {
+            "version": self.BASELINE_VERSION,
             "sfp": 0.45, "duty_ratio": 1.50,
             "supply_duty": 40.0, "exhaust_duty": 27.0,
             "supply_rpm_per_flow": 8.0,
             "captured_at": None, "filter_days_at_capture": None,
+            "per_fan_level": {},
         }
 
     def _dir(self):
@@ -156,12 +184,17 @@ class ZehnderMonitor(hass.Hass):
             self.log(f"Save {name} failed: {e}", level="ERROR")
 
     def _persist(self):
-        cutoff = time.time() - 86400
+        cutoff = time.time() - (self.BUFFER_HOURS * 3600)
+        baseline_cutoff = time.time() - (self.BASELINE_CANDIDATE_HOURS * 3600)
         self._save_json(self.STATE_FILE, {
             "sfp_buffer": [(t, v) for t, v in self.sfp_buffer if t > cutoff],
             "ratio_buffer": [(t, v) for t, v in self.ratio_buffer if t > cutoff],
             "rpm_ratio_buffer": [(t, v) for t, v in self.rpm_ratio_buffer if t > cutoff],
             "heat_recovery_buffer": [(t, v) for t, v in self.heat_recovery_buffer if t > cutoff],
+            "baseline_candidate_buffer": [
+                sample for sample in self.baseline_candidate_buffer
+                if sample.get("time", 0) > baseline_cutoff
+            ],
             "last_filter_days": self.last_filter_days,
             "last_conditioned_sample_at": self.last_conditioned_sample_at,
             "saved_at": datetime.now().isoformat(),
@@ -174,8 +207,111 @@ class ZehnderMonitor(hass.Hass):
         self.ratio_buffer = s.get("ratio_buffer", [])
         self.rpm_ratio_buffer = s.get("rpm_ratio_buffer", [])
         self.heat_recovery_buffer = s.get("heat_recovery_buffer", [])
+        self.baseline_candidate_buffer = s.get("baseline_candidate_buffer", [])
         self.last_filter_days = s.get("last_filter_days")
         self.last_conditioned_sample_at = s.get("last_conditioned_sample_at")
+
+    # =================================================================
+    # BASELINES
+    # =================================================================
+
+    def _migrate_baselines(self, baselines):
+        data = {**self._defaults(), **(baselines or {})}
+        data["version"] = self.BASELINE_VERSION
+        per_fan_level = data.get("per_fan_level") or {}
+
+        fan_level = data.get("fan_level_at_capture")
+        if (
+            fan_level
+            and fan_level not in per_fan_level
+            and data.get("captured_at")
+        ):
+            per_fan_level[fan_level] = self._baseline_snapshot(
+                data,
+                quality=data.get("baseline_quality") or data.get("quality") or "single_sample",
+                sample_count=data.get("sample_count", 1),
+            )
+
+        data["per_fan_level"] = per_fan_level
+        return data
+
+    def _baseline_snapshot(self, source, quality, sample_count):
+        return {
+            "sfp": source.get("sfp"),
+            "duty_ratio": source.get("duty_ratio"),
+            "supply_duty": source.get("supply_duty"),
+            "exhaust_duty": source.get("exhaust_duty"),
+            "supply_rpm_per_flow": source.get("supply_rpm_per_flow"),
+            "fan_level_at_capture": source.get("fan_level_at_capture"),
+            "captured_at": source.get("captured_at"),
+            "filter_days_at_capture": source.get("filter_days_at_capture"),
+            "baseline_quality": quality,
+            "sample_count": sample_count,
+        }
+
+    def _valid_baseline(self, baseline):
+        try:
+            return (
+                baseline
+                and 0 < float(baseline.get("sfp", 0)) < self.SFP_REPLACE
+                and 0 < float(baseline.get("duty_ratio", 0)) < self.RATIO_REPLACE
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _baseline_for(self, r):
+        fan_level = r.get("fan_level")
+        per_fan_level = self.baselines.get("per_fan_level") or {}
+        fan_baseline = per_fan_level.get(fan_level)
+
+        if self._valid_baseline(fan_baseline):
+            return fan_baseline, fan_baseline.get("baseline_quality", "single_sample")
+
+        if self._valid_baseline(self.baselines):
+            quality = (
+                self.baselines.get("baseline_quality")
+                or self.baselines.get("quality")
+                or ("single_sample" if self.baselines.get("captured_at") else "fallback")
+            )
+            return self.baselines, quality
+
+        learning = any(
+            sample.get("fan_level") == fan_level
+            for sample in self.baseline_candidate_buffer
+        )
+        return self._defaults(), "learning" if learning else "invalid"
+
+    def _baseline_capability(self, r):
+        baseline, quality = self._baseline_for(r)
+        capability = compute_capability(
+            self.health_sfp,
+            self.health_duty_ratio,
+            baseline.get("sfp"),
+            baseline.get("duty_ratio"),
+            self.SFP_PRISTINE,
+            self.SFP_REPLACE,
+            self.RATIO_REPLACE,
+            quality,
+        )
+        capability["baseline_fan_level"] = baseline.get("fan_level_at_capture")
+        capability["baseline_sfp"] = baseline.get("sfp")
+        capability["baseline_duty_ratio"] = baseline.get("duty_ratio")
+        return capability
+
+    def _capture_payload(self, r, quality, sample_count):
+        return {
+            "version": self.BASELINE_VERSION,
+            "sfp": round(self.sfp, 4),
+            "duty_ratio": round(self.duty_ratio, 3),
+            "supply_duty": round(r["supply_duty"], 1),
+            "exhaust_duty": round(r["exhaust_duty"], 1),
+            "supply_rpm_per_flow": round(self.supply_rpm_per_flow, 3),
+            "fan_level_at_capture": r.get("fan_level", "?"),
+            "captured_at": datetime.now().isoformat(),
+            "filter_days_at_capture": r.get("filter_days", 0),
+            "baseline_quality": quality,
+            "sample_count": sample_count,
+        }
 
     # =================================================================
     # SENSOR I/O
@@ -313,6 +449,7 @@ class ZehnderMonitor(hass.Hass):
             if self.heat_recovery_raw is not None:
                 self.heat_recovery_buffer.append((now, self.heat_recovery_raw))
             self.last_conditioned_sample_at = now
+            self._record_baseline_candidate(r, now)
 
         # Prune to window
         cutoff = now - (self.BUFFER_HOURS * 3600)
@@ -326,6 +463,79 @@ class ZehnderMonitor(hass.Hass):
         self._conditioned_metrics(now)
         self.sfp_trend_slope = (
             self._slope(self.sfp_buffer) if len(self.sfp_buffer) >= 20 else 0.0
+        )
+
+    def _record_baseline_candidate(self, r, now):
+        days = r.get("filter_days")
+        fan_level = r.get("fan_level")
+        if (
+            days is None
+            or days < self.BASELINE_LEARNING_MIN_DAYS
+            or fan_level not in self.SAMPLE_FAN_LEVELS
+        ):
+            return
+
+        self.baseline_candidate_buffer.append({
+            "time": now,
+            "fan_level": fan_level,
+            "sfp": self.sfp,
+            "duty_ratio": self.duty_ratio,
+            "supply_duty": r.get("supply_duty"),
+            "exhaust_duty": r.get("exhaust_duty"),
+            "supply_rpm_per_flow": self.supply_rpm_per_flow,
+            "filter_days": days,
+        })
+
+        cutoff = now - (self.BASELINE_CANDIDATE_HOURS * 3600)
+        self.baseline_candidate_buffer = [
+            sample for sample in self.baseline_candidate_buffer
+            if sample.get("time", 0) > cutoff
+        ]
+        self._maybe_promote_conditioned_baseline(fan_level)
+
+    def _maybe_promote_conditioned_baseline(self, fan_level):
+        samples = [
+            sample for sample in self.baseline_candidate_buffer
+            if sample.get("fan_level") == fan_level
+        ]
+        if len(samples) < self.BASELINE_MIN_CONDITIONED_SAMPLES:
+            return
+
+        per_fan_level = self.baselines.setdefault("per_fan_level", {})
+        existing = per_fan_level.get(fan_level)
+        if existing and existing.get("baseline_quality") == "conditioned":
+            return
+
+        source = {
+            "sfp": round(statistics.median(s["sfp"] for s in samples), 4),
+            "duty_ratio": round(statistics.median(s["duty_ratio"] for s in samples), 3),
+            "supply_duty": round(statistics.median(s["supply_duty"] for s in samples), 1),
+            "exhaust_duty": round(statistics.median(s["exhaust_duty"] for s in samples), 1),
+            "supply_rpm_per_flow": round(
+                statistics.median(s["supply_rpm_per_flow"] for s in samples), 3
+            ),
+            "fan_level_at_capture": fan_level,
+            "captured_at": datetime.now().isoformat(),
+            "filter_days_at_capture": round(
+                statistics.median(s["filter_days"] for s in samples), 1
+            ),
+        }
+        snapshot = self._baseline_snapshot(
+            source, quality="conditioned", sample_count=len(samples)
+        )
+        if not self._valid_baseline(snapshot):
+            return
+
+        per_fan_level[fan_level] = snapshot
+        self.baselines.update(source)
+        self.baselines["version"] = self.BASELINE_VERSION
+        self.baselines["baseline_quality"] = "conditioned"
+        self.baselines["sample_count"] = len(samples)
+        self.baselines["per_fan_level"] = per_fan_level
+        self._save_json(self.BASELINE_FILE, self.baselines)
+        self.log(
+            f"Conditioned clean-filter baseline promoted for {fan_level}: "
+            f"SFP={source['sfp']:.3f}, Ratio={source['duty_ratio']:.2f}"
         )
 
     def _recent_values(self, buf, now, hours):
@@ -445,6 +655,7 @@ class ZehnderMonitor(hass.Hass):
             self.sfp_buffer.clear()
             self.ratio_buffer.clear()
             self.rpm_ratio_buffer.clear()
+            self.baseline_candidate_buffer.clear()
             self._notify(
                 "Zehnder Filter Change Detected",
                 "Timer reset detected. Baselines auto-capture in 2 hours.",
@@ -460,16 +671,17 @@ class ZehnderMonitor(hass.Hass):
             self.baseline_timer = self.run_in(self._capture_baseline, 1800)
             return
         self._compute(r)
-        self.baselines = {
-            "sfp": round(self.sfp, 4),
-            "duty_ratio": round(self.duty_ratio, 3),
-            "supply_duty": round(r["supply_duty"], 1),
-            "exhaust_duty": round(r["exhaust_duty"], 1),
-            "supply_rpm_per_flow": round(self.supply_rpm_per_flow, 3),
-            "fan_level_at_capture": r.get("fan_level", "?"),
-            "captured_at": datetime.now().isoformat(),
-            "filter_days_at_capture": r.get("filter_days", 0),
-        }
+        captured = self._capture_payload(r, quality="single_sample", sample_count=1)
+        self.baselines = self._migrate_baselines({
+            **self.baselines,
+            **captured,
+            "per_fan_level": {
+                **(self.baselines.get("per_fan_level") or {}),
+                captured["fan_level_at_capture"]: self._baseline_snapshot(
+                    captured, quality="single_sample", sample_count=1
+                ),
+            },
+        })
         self._save_json(self.BASELINE_FILE, self.baselines)
         self._notify(
             "Zehnder Baselines Captured",
@@ -500,6 +712,7 @@ class ZehnderMonitor(hass.Hass):
         days = r.get("filter_days") or 0
         tim_s = max(0, min(100, days / self.FILTER_CYCLE * 100))
         self.health_score = round(sfp_s * 0.50 + rat_s * 0.30 + tim_s * 0.20, 1)
+        self.capability = self._baseline_capability(r)
 
     # =================================================================
     # NOTIFICATIONS
@@ -673,6 +886,57 @@ class ZehnderMonitor(hass.Hass):
                 "icon": "mdi:thermometer-check",
                 "value_template": "{{ value_json.metrics.heat_recovery_quality }}",
             }),
+            ("filter_capacity_remaining", {
+                "name": "Zehnder Filter Capacity Remaining",
+                "unique_id": "zehnder_monitor_filter_capacity_remaining",
+                "default_entity_id": "sensor.zehnder_filter_capacity_remaining",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "icon": "mdi:air-filter-check",
+                "value_template": "{{ value_json.capability.filter_capacity_remaining }}",
+                "availability_topic": "zehnder/monitor/state",
+                "availability_template": "{{ 'online' if value_json.capability.baseline_quality in ['conditioned', 'single_sample'] and value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
+            }),
+            ("sfp_capacity_remaining", {
+                "name": "Zehnder SFP Capacity Remaining",
+                "unique_id": "zehnder_monitor_sfp_capacity_remaining",
+                "default_entity_id": "sensor.zehnder_sfp_capacity_remaining",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "icon": "mdi:speedometer",
+                "value_template": "{{ value_json.capability.sfp_capacity_remaining }}",
+                "availability_topic": "zehnder/monitor/state",
+                "availability_template": "{{ 'online' if value_json.capability.baseline_quality in ['conditioned', 'single_sample'] and value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
+            }),
+            ("duty_capacity_remaining", {
+                "name": "Zehnder Duty Capacity Remaining",
+                "unique_id": "zehnder_monitor_duty_capacity_remaining",
+                "default_entity_id": "sensor.zehnder_duty_capacity_remaining",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "icon": "mdi:arrow-split-vertical",
+                "value_template": "{{ value_json.capability.duty_capacity_remaining }}",
+                "availability_topic": "zehnder/monitor/state",
+                "availability_template": "{{ 'online' if value_json.capability.baseline_quality in ['conditioned', 'single_sample'] and value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
+            }),
+            ("baseline_system_resistance", {
+                "name": "Zehnder Baseline System Resistance",
+                "unique_id": "zehnder_monitor_baseline_system_resistance",
+                "default_entity_id": "sensor.zehnder_baseline_system_resistance",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "icon": "mdi:gauge",
+                "value_template": "{{ value_json.capability.baseline_system_resistance }}",
+                "availability_topic": "zehnder/monitor/state",
+                "availability_template": "{{ 'online' if value_json.capability.baseline_quality in ['conditioned', 'single_sample'] else 'offline' }}",
+            }),
+            ("baseline_quality", {
+                "name": "Zehnder Baseline Quality",
+                "unique_id": "zehnder_monitor_baseline_quality",
+                "default_entity_id": "sensor.zehnder_baseline_quality",
+                "icon": "mdi:database-check",
+                "value_template": "{{ value_json.capability.baseline_quality }}",
+            }),
         ]
 
         for key, config in sensors:
@@ -729,6 +993,7 @@ class ZehnderMonitor(hass.Hass):
                 "energy_ytd_kwh": r.get("energy_ytd"),
                 "temp_age_seconds": r.get("temp_ages", {}),
             },
+            "capability": self.capability,
             "baselines": self.baselines,
         }
         try:
@@ -783,6 +1048,7 @@ class ZehnderMonitor(hass.Hass):
                 f"[HB] Health:{self.health_score:.0f}% ({self._health_l()}) | "
                 f"SFP:{self.health_sfp:.3f} ({self._sfp_c(self.health_sfp)}) | "
                 f"Raw:{self.sfp:.3f} | Ratio:{self.health_duty_ratio:.2f}x | "
+                f"Capacity:{self.capability.get('filter_capacity_remaining')}% | "
                 f"Fan:{r['fan_level']} | eta:{self.heat_recovery_eta:.0f}% | "
                 f"Filter:{r.get('filter_days','?')}d | "
                 f"Buf:{len(self.sfp_buffer)} | Quality:{self.sample_quality}"

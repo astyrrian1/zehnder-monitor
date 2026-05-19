@@ -1,0 +1,261 @@
+import importlib.util
+import json
+import pathlib
+import sys
+import tempfile
+import time
+import types
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+APP_DIR = ROOT / "apps" / "zehnder_monitor"
+sys.path.insert(0, str(APP_DIR))
+
+
+def load_monitor_module():
+    appdaemon = types.ModuleType("appdaemon")
+    plugins = types.ModuleType("appdaemon.plugins")
+    hass = types.ModuleType("appdaemon.plugins.hass")
+    hassapi = types.ModuleType("appdaemon.plugins.hass.hassapi")
+
+    class DummyHass:
+        pass
+
+    hassapi.Hass = DummyHass
+    sys.modules.setdefault("appdaemon", appdaemon)
+    sys.modules.setdefault("appdaemon.plugins", plugins)
+    sys.modules.setdefault("appdaemon.plugins.hass", hass)
+    sys.modules.setdefault("appdaemon.plugins.hass.hassapi", hassapi)
+
+    spec = importlib.util.spec_from_file_location(
+        "zehnder_monitor", APP_DIR / "zehnder_monitor.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+capability_spec = importlib.util.spec_from_file_location(
+    "capability", APP_DIR / "capability.py"
+)
+capability = importlib.util.module_from_spec(capability_spec)
+capability_spec.loader.exec_module(capability)
+monitor_module = load_monitor_module()
+ZehnderMonitor = monitor_module.ZehnderMonitor
+
+
+class CapabilityMathTests(unittest.TestCase):
+    def test_current_clean_baseline_reports_full_capacity(self):
+        cap = capability.compute_capability(
+            current_sfp=0.5575,
+            current_ratio=1.231,
+            baseline_sfp=0.5575,
+            baseline_ratio=1.231,
+            sfp_pristine=0.35,
+            sfp_replace=0.80,
+            ratio_replace=2.50,
+            baseline_quality="single_sample",
+        )
+
+        self.assertEqual(cap["filter_capacity_remaining"], 100.0)
+        self.assertEqual(cap["sfp_capacity_remaining"], 100.0)
+        self.assertEqual(cap["duty_capacity_remaining"], 100.0)
+        self.assertEqual(cap["baseline_system_resistance"], 46.1)
+
+    def test_current_near_baseline_remains_near_full_capacity(self):
+        cap = capability.compute_capability(
+            current_sfp=0.5543,
+            current_ratio=1.249,
+            baseline_sfp=0.5575,
+            baseline_ratio=1.231,
+            sfp_pristine=0.35,
+            sfp_replace=0.80,
+            ratio_replace=2.50,
+            baseline_quality="single_sample",
+        )
+
+        self.assertGreaterEqual(cap["filter_capacity_remaining"], 99.0)
+        self.assertLessEqual(cap["filter_capacity_remaining"], 100.0)
+        self.assertEqual(cap["sfp_capacity_remaining"], 100.0)
+
+    def test_replace_thresholds_report_zero_capacity(self):
+        cap = capability.compute_capability(
+            current_sfp=0.80,
+            current_ratio=2.50,
+            baseline_sfp=0.5575,
+            baseline_ratio=1.231,
+            sfp_pristine=0.35,
+            sfp_replace=0.80,
+            ratio_replace=2.50,
+            baseline_quality="single_sample",
+        )
+
+        self.assertEqual(cap["filter_capacity_remaining"], 0.0)
+        self.assertEqual(cap["sfp_capacity_remaining"], 0.0)
+        self.assertEqual(cap["duty_capacity_remaining"], 0.0)
+
+    def test_values_better_than_baseline_cap_at_full_capacity(self):
+        cap = capability.compute_capability(
+            current_sfp=0.50,
+            current_ratio=1.20,
+            baseline_sfp=0.5575,
+            baseline_ratio=1.231,
+            sfp_pristine=0.35,
+            sfp_replace=0.80,
+            ratio_replace=2.50,
+            baseline_quality="single_sample",
+        )
+
+        self.assertEqual(cap["filter_capacity_remaining"], 100.0)
+        self.assertEqual(cap["sfp_capacity_remaining"], 100.0)
+        self.assertEqual(cap["duty_capacity_remaining"], 100.0)
+
+    def test_fallback_baseline_does_not_publish_capacity_numbers(self):
+        cap = capability.compute_capability(
+            current_sfp=0.55,
+            current_ratio=1.25,
+            baseline_sfp=0.45,
+            baseline_ratio=1.50,
+            sfp_pristine=0.35,
+            sfp_replace=0.80,
+            ratio_replace=2.50,
+            baseline_quality="fallback",
+        )
+
+        self.assertIsNone(cap["filter_capacity_remaining"])
+        self.assertIsNone(cap["sfp_capacity_remaining"])
+        self.assertEqual(cap["baseline_quality"], "fallback")
+
+
+class MonitorIntegrationTests(unittest.TestCase):
+    def make_monitor(self):
+        mon = ZehnderMonitor.__new__(ZehnderMonitor)
+        mon.baseline_candidate_buffer = []
+        mon.log = lambda *args, **kwargs: None
+        return mon
+
+    def test_migrates_existing_single_baseline_and_keeps_may_18_valid(self):
+        mon = self.make_monitor()
+        old_baseline = {
+            "sfp": 0.5575,
+            "duty_ratio": 1.231,
+            "supply_duty": 68.5,
+            "exhaust_duty": 55.7,
+            "supply_rpm_per_flow": 8.024,
+            "fan_level_at_capture": "Medium",
+            "captured_at": "2026-05-18T12:36:53.461672",
+            "filter_days_at_capture": 180.0,
+        }
+
+        migrated = mon._migrate_baselines(old_baseline)
+        mon.baselines = migrated
+        mon.health_sfp = 0.5543
+        mon.health_duty_ratio = 1.249
+
+        cap = mon._baseline_capability({"fan_level": "Medium"})
+
+        self.assertEqual(migrated["version"], 2)
+        self.assertEqual(
+            migrated["per_fan_level"]["Medium"]["baseline_quality"],
+            "single_sample",
+        )
+        self.assertGreaterEqual(cap["filter_capacity_remaining"], 99.0)
+        self.assertEqual(cap["baseline_quality"], "single_sample")
+
+    def test_persistence_keeps_full_168_hour_trend_window(self):
+        mon = self.make_monitor()
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            mon._dir = lambda: tmp
+            mon.sfp_buffer = [(now - (25 * 3600), 0.55), (now - (169 * 3600), 0.6)]
+            mon.ratio_buffer = [(now - (25 * 3600), 1.2), (now - (169 * 3600), 1.3)]
+            mon.rpm_ratio_buffer = [(now - (25 * 3600), 8.0)]
+            mon.heat_recovery_buffer = [(now - (25 * 3600), 90.0)]
+            mon.baseline_candidate_buffer = [
+                {"time": now - (23 * 3600), "fan_level": "Medium"},
+                {"time": now - (25 * 3600), "fan_level": "Medium"},
+            ]
+            mon.last_filter_days = 180
+            mon.last_conditioned_sample_at = now
+
+            mon._persist()
+
+            with open(pathlib.Path(tmp) / "state.json", "r") as f:
+                saved = json.load(f)
+
+        self.assertEqual(saved["sfp_buffer"], [[now - (25 * 3600), 0.55]])
+        self.assertEqual(len(saved["baseline_candidate_buffer"]), 1)
+
+    def test_conditioned_samples_promote_per_fan_level_baseline(self):
+        mon = self.make_monitor()
+        now = time.time()
+        mon.baselines = mon._defaults()
+        mon.baseline_candidate_buffer = [
+            {
+                "time": now - i,
+                "fan_level": "Medium",
+                "sfp": 0.557 + (i * 0.00001),
+                "duty_ratio": 1.23 + (i * 0.0001),
+                "supply_duty": 68.5,
+                "exhaust_duty": 55.7,
+                "supply_rpm_per_flow": 8.02,
+                "filter_days": 179.0,
+            }
+            for i in range(mon.BASELINE_MIN_CONDITIONED_SAMPLES)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mon._dir = lambda: tmp
+            mon._maybe_promote_conditioned_baseline("Medium")
+
+            with open(pathlib.Path(tmp) / "baselines.json", "r") as f:
+                saved = json.load(f)
+
+        baseline = saved["per_fan_level"]["Medium"]
+        self.assertEqual(baseline["baseline_quality"], "conditioned")
+        self.assertEqual(baseline["sample_count"], mon.BASELINE_MIN_CONDITIONED_SAMPLES)
+        self.assertEqual(saved["baseline_quality"], "conditioned")
+
+    def test_mqtt_discovery_preserves_existing_unique_ids_and_adds_only_new_sensors(self):
+        mon = self.make_monitor()
+        published = {}
+
+        def call_service(service, **kwargs):
+            self.assertEqual(service, "mqtt/publish")
+            key = kwargs["topic"].split("/")[-2]
+            published[key] = json.loads(kwargs["payload"])
+
+        mon.call_service = call_service
+
+        self.assertTrue(mon._publish_mqtt_discovery())
+
+        expected_existing = {
+            "sfp": "zehnder_monitor_sfp",
+            "filter_health": "zehnder_monitor_filter_health",
+            "duty_ratio": "zehnder_monitor_duty_ratio",
+            "heat_recovery": "zehnder_monitor_heat_recovery",
+            "sfp_trend": "zehnder_monitor_sfp_trend",
+            "sample_quality": "zehnder_monitor_sample_quality",
+            "conditioned_samples": "zehnder_monitor_conditioned_samples",
+            "raw_sfp": "zehnder_monitor_raw_sfp",
+            "raw_heat_recovery": "zehnder_monitor_raw_heat_recovery",
+            "heat_recovery_quality": "zehnder_monitor_heat_recovery_quality",
+        }
+        expected_new = {
+            "filter_capacity_remaining": "zehnder_monitor_filter_capacity_remaining",
+            "sfp_capacity_remaining": "zehnder_monitor_sfp_capacity_remaining",
+            "duty_capacity_remaining": "zehnder_monitor_duty_capacity_remaining",
+            "baseline_system_resistance": "zehnder_monitor_baseline_system_resistance",
+            "baseline_quality": "zehnder_monitor_baseline_quality",
+        }
+
+        for key, unique_id in expected_existing.items():
+            self.assertEqual(published[key]["unique_id"], unique_id)
+
+        for key, unique_id in expected_new.items():
+            self.assertEqual(published[key]["unique_id"], unique_id)
+
+
+if __name__ == "__main__":
+    unittest.main()
