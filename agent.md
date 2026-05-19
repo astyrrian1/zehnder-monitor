@@ -9,7 +9,7 @@ This repository contains a standalone, physics-based filter health monitoring sy
 3. **Conditioned Sampling:** Trend analysis (the 7-day linear regression) must only incorporate data sampled under steady-state conditions (e.g., fan level "Low", bypass disabled, negligible flow imbalance). Transient events (like bathroom boosts or defrost cycles) must be explicitly filtered out before updating ring buffers.
 4. **AppDaemon Architecture:** 
   - Application logic: `apps/zehnder_monitor/zehnder_monitor.py`
-  - State persistence (baselines, trends) is handled via local `*.json` files in the app directory.
+  - State persistence (baselines, trends) is handled via `*.json` files in the monitor data directory, outside the HACS-managed app directory.
 
 ## Deployment
 - This repo is **HACS-managed** as an AppDaemon app (category: `appdaemon`).

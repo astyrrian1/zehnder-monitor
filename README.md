@@ -158,7 +158,9 @@ Heat recovery is stricter: it is only published as a trusted metric when the out
 
 Baselines are captured automatically when a filter change is detected (the countdown timer jumps by >90 days). After detection, the system waits 2 hours for stabilisation before recording.
 
-Baselines persist in `baselines.json` alongside the app. Existing baseline files are migrated internally and remain valid, including single-sample clean-filter captures. When enough stable clean-filter samples are available at a fan level, the monitor stores a conditioned per-fan-level baseline and uses it for capability metrics.
+Baselines and rolling trend state persist outside the HACS-managed app directory, under `<appdaemon config>/zehnder-monitor/` by default. Existing `baselines.json` and `state.json` files found alongside the app are migrated automatically on first startup, so clean-filter captures and the 7-day conditioned sample window survive future HACS updates. Set `data_dir` in the AppDaemon app config if you need a custom persistence location.
+
+When enough stable clean-filter samples are available at a fan level, the monitor stores a conditioned per-fan-level baseline and uses it for capability metrics.
 
 ## Baseline-Aware Capacity
 

@@ -95,6 +95,7 @@ class ZehnderMonitor(hass.Hass):
     BASELINE_LEARNING_MIN_DAYS = FILTER_CYCLE - 14
     STATE_FILE     = "state.json"
     BASELINE_FILE  = "baselines.json"
+    DATA_DIR_ARG   = "data_dir"
 
     # =================================================================
     # INIT
@@ -102,7 +103,7 @@ class ZehnderMonitor(hass.Hass):
 
     def initialize(self):
         self.log("=" * 60)
-        self.log("ZEHNDER MONITOR v1.8.0 -- Physics-Based Filter Health")
+        self.log("ZEHNDER MONITOR v1.9.1 -- Physics-Based Filter Health")
         self.log("=" * 60)
 
         self.sfp = 0.0
@@ -167,19 +168,70 @@ class ZehnderMonitor(hass.Hass):
     def _dir(self):
         return os.path.dirname(os.path.abspath(__file__))
 
+    def _data_dir(self):
+        args = getattr(self, "args", {}) or {}
+        configured = args.get(self.DATA_DIR_ARG) or args.get("persistence_dir")
+        app_dir = os.path.dirname(self._dir())
+        config_dir = os.path.dirname(app_dir)
+        if configured:
+            configured = os.path.expanduser(configured)
+            if not os.path.isabs(configured):
+                configured = os.path.join(config_dir, configured)
+            return os.path.abspath(configured)
+
+        return os.path.join(config_dir, "zehnder-monitor")
+
+    def _json_paths(self, name):
+        primary = os.path.join(self._data_dir(), name)
+        legacy = os.path.join(self._dir(), name)
+        if os.path.abspath(primary) == os.path.abspath(legacy):
+            return [primary]
+        return [primary, legacy]
+
     def _load_json(self, name, defaults):
-        path = os.path.join(self._dir(), name)
-        try:
-            with open(path, "r") as f:
-                return {**defaults, **json.load(f)}
-        except (FileNotFoundError, json.JSONDecodeError):
-            return dict(defaults)
+        paths = self._json_paths(name)
+        primary = paths[0]
+
+        for path in paths:
+            try:
+                with open(path, "r") as f:
+                    data = {**defaults, **json.load(f)}
+            except FileNotFoundError:
+                continue
+            except json.JSONDecodeError as e:
+                self.log(f"Load {name} failed from {path}: {e}", level="ERROR")
+                continue
+
+            if path != primary:
+                self.log(f"Migrating {name} from legacy app directory to {primary}.")
+                self._save_json(name, data)
+            return data
+
+        return dict(defaults)
 
     def _save_json(self, name, data):
-        path = os.path.join(self._dir(), name)
+        paths = self._json_paths(name)
+        errors = []
+        for path in paths:
+            directory = os.path.dirname(path)
+            tmp_path = f"{path}.tmp"
+            try:
+                os.makedirs(directory, exist_ok=True)
+                with open(tmp_path, "w") as f:
+                    json.dump(data, f, indent=2, default=str)
+                os.replace(tmp_path, path)
+                return
+            except Exception as e:
+                errors.append(f"{path}: {e}")
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+
         try:
-            with open(path, "w") as f:
-                json.dump(data, f, indent=2, default=str)
+            joined = "; ".join(errors)
+            self.log(f"Save {name} failed: {joined}", level="ERROR")
         except Exception as e:
             self.log(f"Save {name} failed: {e}", level="ERROR")
 
