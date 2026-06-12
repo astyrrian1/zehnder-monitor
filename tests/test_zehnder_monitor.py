@@ -159,12 +159,59 @@ class CapabilityMathTests(unittest.TestCase):
         self.assertIsNone(cap["sfp_capacity_remaining"])
         self.assertIsNotNone(cap["duty_capacity_remaining"])
 
+    def test_capacity_floor_keeps_remaining_capacity_from_increasing(self):
+        worse = capability.compute_capability(
+            current_sfp=0.57,
+            current_ratio=1.30,
+            baseline_sfp=0.5228,
+            baseline_ratio=1.265,
+            sfp_pristine=0.35,
+            sfp_replace=0.80,
+            ratio_replace=2.50,
+            baseline_quality="conditioned",
+        )
+        floored, floor_values, changed = capability.floor_capacity_payload(worse, {})
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            floored["filter_capacity_remaining"],
+            floored["instant_filter_capacity_remaining"],
+        )
+
+        better = capability.compute_capability(
+            current_sfp=0.53,
+            current_ratio=1.27,
+            baseline_sfp=0.5228,
+            baseline_ratio=1.265,
+            sfp_pristine=0.35,
+            sfp_replace=0.80,
+            ratio_replace=2.50,
+            baseline_quality="conditioned",
+        )
+        floored_better, _, changed = capability.floor_capacity_payload(
+            better, floor_values
+        )
+
+        self.assertFalse(changed)
+        self.assertGreater(
+            floored_better["instant_filter_capacity_remaining"],
+            floored_better["filter_capacity_remaining"],
+        )
+        self.assertEqual(
+            floored_better["filter_capacity_remaining"],
+            floored["filter_capacity_remaining"],
+        )
+
 
 class MonitorIntegrationTests(unittest.TestCase):
     def make_monitor(self):
         mon = ZehnderMonitor.__new__(ZehnderMonitor)
         mon.baseline_candidate_buffer = []
         mon.args = {}
+        mon.sample_quality = "conditioned"
+        mon.health_floor = None
+        mon.instant_health_score = 100.0
+        mon.capacity_floor = {}
         mon.log = lambda *args, **kwargs: None
         return mon
 
@@ -195,6 +242,88 @@ class MonitorIntegrationTests(unittest.TestCase):
         )
         self.assertGreaterEqual(cap["filter_capacity_remaining"], 99.0)
         self.assertEqual(cap["baseline_quality"], "single_sample")
+
+    def test_baseline_capability_keeps_capacity_remaining_from_increasing(self):
+        mon = self.make_monitor()
+        mon.baselines = {
+            "version": 2,
+            "sfp": 0.5228,
+            "duty_ratio": 1.265,
+            "fan_level_at_capture": "Medium",
+            "baseline_quality": "conditioned",
+            "captured_at": "2026-05-19T13:02:08.590968",
+            "per_fan_level": {
+                "Medium": {
+                    "sfp": 0.5228,
+                    "duty_ratio": 1.265,
+                    "fan_level_at_capture": "Medium",
+                    "baseline_quality": "conditioned",
+                },
+            },
+        }
+        mon.health_sfp = 0.57
+        mon.health_duty_ratio = 1.30
+        first = mon._baseline_capability({"fan_level": "Medium", "filter_days": 154})
+
+        mon.health_sfp = 0.53
+        mon.health_duty_ratio = 1.27
+        second = mon._baseline_capability({"fan_level": "Medium", "filter_days": 154})
+
+        self.assertGreater(
+            second["instant_filter_capacity_remaining"],
+            second["filter_capacity_remaining"],
+        )
+        self.assertEqual(
+            second["filter_capacity_remaining"],
+            first["filter_capacity_remaining"],
+        )
+
+    def test_filter_health_keeps_cycle_minimum_when_samples_improve(self):
+        mon = self.make_monitor()
+        mon.baselines = {
+            "version": 2,
+            "sfp": 0.5228,
+            "duty_ratio": 1.265,
+            "fan_level_at_capture": "Medium",
+            "baseline_quality": "conditioned",
+            "captured_at": "2026-05-19T13:02:08.590968",
+            "per_fan_level": {},
+        }
+
+        mon.health_sfp = 0.57
+        mon.health_duty_ratio = 1.30
+        mon._health({"filter_days": 154, "fan_level": "Medium"})
+        floor = mon.health_score
+
+        mon.health_sfp = 0.53
+        mon.health_duty_ratio = 1.27
+        mon._health({"filter_days": 154, "fan_level": "Medium"})
+
+        self.assertGreater(mon.instant_health_score, floor)
+        self.assertEqual(mon.health_score, floor)
+
+    def test_warming_up_sample_does_not_seed_new_cycle_floors(self):
+        mon = self.make_monitor()
+        mon.sample_quality = "warming_up"
+        mon.health_floor = None
+        mon.capacity_floor = {}
+        mon.baselines = {
+            "version": 2,
+            "sfp": 0.5228,
+            "duty_ratio": 1.265,
+            "fan_level_at_capture": "Medium",
+            "baseline_quality": "conditioned",
+            "captured_at": "2026-05-19T13:02:08.590968",
+            "per_fan_level": {},
+        }
+        mon.health_sfp = 0.57
+        mon.health_duty_ratio = 1.30
+
+        mon._health({"filter_days": 180, "fan_level": "Medium"})
+
+        self.assertIsNone(mon.health_floor)
+        self.assertEqual(mon.capability["capacity_mode"], "untrusted_warming_up")
+        self.assertIsNone(mon.capability["filter_capacity_remaining"])
 
     def test_missing_baseline_reports_learning_when_clean_samples_are_accumulating(self):
         mon = self.make_monitor()
@@ -238,6 +367,12 @@ class MonitorIntegrationTests(unittest.TestCase):
                 {"time": now - (23 * 3600), "fan_level": "Medium"},
                 {"time": now - (25 * 3600), "fan_level": "Medium"},
             ]
+            mon.health_floor = 74.2
+            mon.capacity_floor = {
+                "values": {"filter_capacity_remaining": 91.3},
+                "updated_at": "2026-06-12T00:00:00",
+                "filter_days": 154,
+            }
             mon.last_filter_days = 180
             mon.last_conditioned_sample_at = now
 
@@ -248,6 +383,10 @@ class MonitorIntegrationTests(unittest.TestCase):
 
         self.assertEqual(saved["sfp_buffer"], [[now - (25 * 3600), 0.55]])
         self.assertEqual(len(saved["baseline_candidate_buffer"]), 1)
+        self.assertEqual(saved["health_floor"], 74.2)
+        self.assertEqual(
+            saved["capacity_floor"]["values"]["filter_capacity_remaining"], 91.3
+        )
 
     def test_conditioned_samples_promote_per_fan_level_baseline(self):
         mon = self.make_monitor()
@@ -372,6 +511,7 @@ class MonitorIntegrationTests(unittest.TestCase):
         mon.heat_recovery_eta = 90.0
         mon.heat_recovery_quality = "conditioned"
         mon.health_score = 76.2
+        mon.instant_health_score = 76.2
         mon.sfp_trend_slope = 0.0001
         mon.sfp_buffer = [(time.time(), 0.5543)]
         mon.sample_quality = "conditioned"
@@ -413,6 +553,7 @@ class MonitorIntegrationTests(unittest.TestCase):
         self.assertEqual(
             published["capability"]["filter_capacity_remaining"], 99.5
         )
+        self.assertEqual(published["health"]["instant_score"], 76.2)
 
 
 if __name__ == "__main__":

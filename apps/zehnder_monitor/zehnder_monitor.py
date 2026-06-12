@@ -27,10 +27,18 @@ import importlib.util
 from datetime import datetime, timezone
 
 try:
-    from capability import compute_capability
+    from capability import (
+        CAPACITY_REMAINING_KEYS,
+        compute_capability,
+        floor_capacity_payload,
+    )
 except ImportError:
     try:
-        from .capability import compute_capability
+        from .capability import (
+            CAPACITY_REMAINING_KEYS,
+            compute_capability,
+            floor_capacity_payload,
+        )
     except ImportError:
         _capability_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "capability.py"
@@ -40,7 +48,9 @@ except ImportError:
         )
         _capability_module = importlib.util.module_from_spec(_capability_spec)
         _capability_spec.loader.exec_module(_capability_module)
+        CAPACITY_REMAINING_KEYS = _capability_module.CAPACITY_REMAINING_KEYS
         compute_capability = _capability_module.compute_capability
+        floor_capacity_payload = _capability_module.floor_capacity_payload
 
 
 class ZehnderMonitor(hass.Hass):
@@ -88,6 +98,7 @@ class ZehnderMonitor(hass.Hass):
     STABLE_TICKS_REQUIRED = 3
     STABILITY_TOLERANCE = 0.08
     SAMPLE_FAN_LEVELS = ("Low", "Medium")
+    TRUSTED_SAMPLE_QUALITIES = ("conditioned", "conditioned_stale")
     TEMP_MAX_AGE_SECONDS = 600
     BASELINE_VERSION = 2
     BASELINE_MIN_CONDITIONED_SAMPLES = 20
@@ -115,10 +126,13 @@ class ZehnderMonitor(hass.Hass):
         self.heat_recovery_raw = None
         self.heat_recovery_quality = "unavailable"
         self.health_score = 100.0
+        self.instant_health_score = 100.0
+        self.health_floor = None
         self.sfp_trend_slope = 0.0
         self.health_sfp = 0.0
         self.health_duty_ratio = 1.0
         self.capability = {}
+        self.capacity_floor = {}
         self.sample_quality = "warming_up"
         self.last_conditioned_sample_at = None
         self.previous_sample_context = None
@@ -247,6 +261,8 @@ class ZehnderMonitor(hass.Hass):
                 sample for sample in self.baseline_candidate_buffer
                 if sample.get("time", 0) > baseline_cutoff
             ],
+            "health_floor": self.health_floor,
+            "capacity_floor": self.capacity_floor,
             "last_filter_days": self.last_filter_days,
             "last_conditioned_sample_at": self.last_conditioned_sample_at,
             "saved_at": datetime.now().isoformat(),
@@ -260,8 +276,47 @@ class ZehnderMonitor(hass.Hass):
         self.rpm_ratio_buffer = s.get("rpm_ratio_buffer", [])
         self.heat_recovery_buffer = s.get("heat_recovery_buffer", [])
         self.baseline_candidate_buffer = s.get("baseline_candidate_buffer", [])
+        self.health_floor = self._pct_or_none(s.get("health_floor"))
+        self.capacity_floor = self._restore_capacity_floor(s.get("capacity_floor"))
         self.last_filter_days = s.get("last_filter_days")
         self.last_conditioned_sample_at = s.get("last_conditioned_sample_at")
+
+    def _pct_or_none(self, value):
+        try:
+            return round(max(0.0, min(100.0, float(value))), 1)
+        except (TypeError, ValueError):
+            return None
+
+    def _restore_capacity_floor(self, saved):
+        if not isinstance(saved, dict):
+            return {}
+        values = saved.get("values")
+        if not isinstance(values, dict):
+            values = {
+                key: saved.get(key)
+                for key in CAPACITY_REMAINING_KEYS
+                if saved.get(key) is not None
+            }
+        values = {
+            key: pct
+            for key in CAPACITY_REMAINING_KEYS
+            if (pct := self._pct_or_none(values.get(key))) is not None
+        }
+        return {
+            "values": values,
+            "updated_at": saved.get("updated_at"),
+            "filter_days": saved.get("filter_days"),
+        }
+
+    def _reset_capacity_floor(self):
+        self.capacity_floor = {}
+
+    def _reset_filter_cycle_floors(self):
+        self.health_floor = None
+        self._reset_capacity_floor()
+
+    def _trusted_sample_quality(self):
+        return self.sample_quality in self.TRUSTED_SAMPLE_QUALITIES
 
     # =================================================================
     # BASELINES
@@ -351,6 +406,30 @@ class ZehnderMonitor(hass.Hass):
         capability["baseline_fan_level"] = baseline.get("fan_level_at_capture")
         capability["baseline_sfp"] = baseline.get("sfp")
         capability["baseline_duty_ratio"] = baseline.get("duty_ratio")
+
+        if not self._trusted_sample_quality():
+            for key in CAPACITY_REMAINING_KEYS:
+                capability[f"instant_{key}"] = capability.get(key)
+                capability[key] = None
+            capability["capacity_mode"] = f"untrusted_{self.sample_quality}"
+            return capability
+
+        floor_values = self.capacity_floor.get("values", {})
+        capability, floor_values, changed = floor_capacity_payload(
+            capability, floor_values
+        )
+        if changed:
+            self.capacity_floor = {
+                "values": floor_values,
+                "updated_at": datetime.now().isoformat(),
+                "filter_days": r.get("filter_days"),
+            }
+        else:
+            self.capacity_floor.setdefault("values", floor_values)
+
+        capability["capacity_mode"] = "cycle_minimum"
+        capability["capacity_floor_updated_at"] = self.capacity_floor.get("updated_at")
+        capability["capacity_floor_filter_days"] = self.capacity_floor.get("filter_days")
         return capability
 
     def _capture_payload(self, r, quality, sample_count):
@@ -588,6 +667,7 @@ class ZehnderMonitor(hass.Hass):
         self.baselines["sample_count"] = len(samples)
         self.baselines["per_fan_level"] = per_fan_level
         self._save_json(self.BASELINE_FILE, self.baselines)
+        self._reset_capacity_floor()
         self.log(
             f"Conditioned clean-filter baseline promoted for {fan_level}: "
             f"SFP={source['sfp']:.3f}, Ratio={source['duty_ratio']:.2f}"
@@ -711,6 +791,8 @@ class ZehnderMonitor(hass.Hass):
             self.ratio_buffer.clear()
             self.rpm_ratio_buffer.clear()
             self.baseline_candidate_buffer.clear()
+            self._reset_filter_cycle_floors()
+            self.sample_quality = "warming_up"
             self._notify(
                 "Zehnder Filter Change Detected",
                 "Timer reset detected. Baselines auto-capture in 2 hours.",
@@ -738,6 +820,7 @@ class ZehnderMonitor(hass.Hass):
             },
         })
         self._save_json(self.BASELINE_FILE, self.baselines)
+        self._reset_capacity_floor()
         self._notify(
             "Zehnder Baselines Captured",
             f"SFP: {self.baselines['sfp']:.3f} kW/(m3/s)\n"
@@ -766,7 +849,18 @@ class ZehnderMonitor(hass.Hass):
             (self.RATIO_REPLACE - self.RATIO_PRISTINE) * 100))
         days = r.get("filter_days") or 0
         tim_s = max(0, min(100, days / self.FILTER_CYCLE * 100))
-        self.health_score = round(sfp_s * 0.50 + rat_s * 0.30 + tim_s * 0.20, 1)
+        self.instant_health_score = round(
+            sfp_s * 0.50 + rat_s * 0.30 + tim_s * 0.20, 1
+        )
+        if self._trusted_sample_quality():
+            if (
+                self.health_floor is None
+                or self.instant_health_score < self.health_floor
+            ):
+                self.health_floor = self.instant_health_score
+            self.health_score = self.health_floor
+        else:
+            self.health_score = self.instant_health_score
         self.capability = self._baseline_capability(r)
 
     # =================================================================
@@ -856,7 +950,7 @@ class ZehnderMonitor(hass.Hass):
                 "icon": "mdi:speedometer",
                 "value_template": "{{ value_json.metrics.sfp }}",
                 "availability_topic": "zehnder/monitor/state",
-                "availability_template": "{{ 'online' if value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
+                "availability_template": "{{ 'online' if value_json.health.sample_quality in ['conditioned', 'conditioned_stale'] else 'offline' }}",
             }),
             ("filter_health", {
                 "name": "Zehnder Filter Health",
@@ -867,7 +961,7 @@ class ZehnderMonitor(hass.Hass):
                 "icon": "mdi:air-filter",
                 "value_template": "{{ value_json.health.score }}",
                 "availability_topic": "zehnder/monitor/state",
-                "availability_template": "{{ 'online' if value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
+                "availability_template": "{{ 'online' if value_json.health.sample_quality in ['conditioned', 'conditioned_stale'] else 'offline' }}",
             }),
             ("duty_ratio", {
                 "name": "Zehnder Duty Ratio",
@@ -877,7 +971,7 @@ class ZehnderMonitor(hass.Hass):
                 "icon": "mdi:arrow-split-vertical",
                 "value_template": "{{ value_json.metrics.duty_ratio }}",
                 "availability_topic": "zehnder/monitor/state",
-                "availability_template": "{{ 'online' if value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
+                "availability_template": "{{ 'online' if value_json.health.sample_quality in ['conditioned', 'conditioned_stale'] else 'offline' }}",
             }),
             ("heat_recovery", {
                 "name": "Zehnder Heat Recovery",
@@ -950,7 +1044,7 @@ class ZehnderMonitor(hass.Hass):
                 "icon": "mdi:air-filter-check",
                 "value_template": "{{ value_json.capability.filter_capacity_remaining }}",
                 "availability_topic": "zehnder/monitor/state",
-                "availability_template": "{{ 'online' if value_json.capability.baseline_quality in ['conditioned', 'single_sample'] and value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
+                "availability_template": "{{ 'online' if value_json.capability.baseline_quality in ['conditioned', 'single_sample'] and value_json.health.sample_quality in ['conditioned', 'conditioned_stale'] else 'offline' }}",
             }),
             ("sfp_capacity_remaining", {
                 "name": "Zehnder SFP Capacity Remaining",
@@ -961,7 +1055,7 @@ class ZehnderMonitor(hass.Hass):
                 "icon": "mdi:speedometer",
                 "value_template": "{{ value_json.capability.sfp_capacity_remaining }}",
                 "availability_topic": "zehnder/monitor/state",
-                "availability_template": "{{ 'online' if value_json.capability.baseline_quality in ['conditioned', 'single_sample'] and value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
+                "availability_template": "{{ 'online' if value_json.capability.baseline_quality in ['conditioned', 'single_sample'] and value_json.health.sample_quality in ['conditioned', 'conditioned_stale'] else 'offline' }}",
             }),
             ("duty_capacity_remaining", {
                 "name": "Zehnder Duty Capacity Remaining",
@@ -972,7 +1066,7 @@ class ZehnderMonitor(hass.Hass):
                 "icon": "mdi:arrow-split-vertical",
                 "value_template": "{{ value_json.capability.duty_capacity_remaining }}",
                 "availability_topic": "zehnder/monitor/state",
-                "availability_template": "{{ 'online' if value_json.capability.baseline_quality in ['conditioned', 'single_sample'] and value_json.health.sample_quality != 'live_fallback' else 'offline' }}",
+                "availability_template": "{{ 'online' if value_json.capability.baseline_quality in ['conditioned', 'single_sample'] and value_json.health.sample_quality in ['conditioned', 'conditioned_stale'] else 'offline' }}",
             }),
             ("baseline_system_resistance", {
                 "name": "Zehnder Baseline System Resistance",
@@ -1021,7 +1115,15 @@ class ZehnderMonitor(hass.Hass):
                 "heat_recovery_quality": self.heat_recovery_quality,
             },
             "health": {
-                "score": self.health_score, "status": self._health_l(),
+                "score": self.health_score,
+                "instant_score": self.instant_health_score,
+                "score_mode": (
+                    "cycle_minimum"
+                    if self._trusted_sample_quality()
+                    else f"untrusted_{self.sample_quality}"
+                ),
+                "health_floor": self.health_floor,
+                "status": self._health_l(),
                 "sfp_trend_per_day": round(self.sfp_trend_slope, 6),
                 "conditioned_samples": len(self.sfp_buffer),
                 "sample_quality": self.sample_quality,
@@ -1101,6 +1203,7 @@ class ZehnderMonitor(hass.Hass):
             self._persist()
             self.log(
                 f"[HB] Health:{self.health_score:.0f}% ({self._health_l()}) | "
+                f"Instant:{self.instant_health_score:.0f}% | "
                 f"SFP:{self.health_sfp:.3f} ({self._sfp_c(self.health_sfp)}) | "
                 f"Raw:{self.sfp:.3f} | Ratio:{self.health_duty_ratio:.2f}x | "
                 f"Capacity:{self.capability.get('filter_capacity_remaining')}% | "

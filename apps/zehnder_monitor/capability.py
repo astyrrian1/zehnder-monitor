@@ -6,6 +6,11 @@ without AppDaemon or Home Assistant.
 
 
 VALID_BASELINE_QUALITIES = ("conditioned", "single_sample")
+CAPACITY_REMAINING_KEYS = (
+    "filter_capacity_remaining",
+    "sfp_capacity_remaining",
+    "duty_capacity_remaining",
+)
 
 
 def clamp_pct(value):
@@ -93,3 +98,43 @@ def compute_capability(
         )
 
     return result
+
+
+def floor_capacity_payload(capability, floor_values):
+    """
+    Apply a monotonic cycle floor to remaining-capacity fields.
+
+    The raw baseline comparison is still useful diagnostics, so each capacity
+    value is copied to an instant_* field before the cycle-minimum value is
+    applied to the public remaining-capacity field.
+    """
+    result = dict(capability)
+    floors = dict(floor_values or {})
+    changed = False
+
+    for key in CAPACITY_REMAINING_KEYS:
+        current = result.get(key)
+        result[f"instant_{key}"] = current
+
+        if current is None:
+            continue
+
+        try:
+            current = float(current)
+        except (TypeError, ValueError):
+            result[key] = None
+            continue
+
+        previous = floors.get(key)
+        try:
+            previous = None if previous is None else float(previous)
+        except (TypeError, ValueError):
+            previous = None
+
+        if previous is None or current < previous:
+            floors[key] = round(current, 1)
+            changed = True
+
+        result[key] = round(float(floors[key]), 1)
+
+    return result, floors, changed
