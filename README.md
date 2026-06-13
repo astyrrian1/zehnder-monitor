@@ -47,7 +47,7 @@ Zehnder ComfoAir Q600
 | Sensor | Type | Description |
 |---|---|---|
 | `sensor.zehnder_sfp` | kW/(m³/s) | Specific Fan Power with EU class attribute |
-| `sensor.zehnder_filter_health` | % | Composite health score (0–100) |
+| `sensor.zehnder_filter_health` | % | Composite cycle-minimum health score (0–100) |
 | `sensor.zehnder_duty_ratio` | ratio | Supply/exhaust duty ratio |
 | `sensor.zehnder_heat_recovery` | % | Heat recovery efficiency |
 | `sensor.zehnder_sfp_trend` | mW/(m³/s)/day | SFP degradation rate from 7-day regression |
@@ -150,7 +150,7 @@ The monitor only records SFP samples when:
 - Power is **> 20W** (unit actually running)
 - Flow imbalance is **< 10%** (no defrost or anomaly)
 
-Headline SFP, duty ratio, and health score use the median of recent conditioned samples when available. Samples are accepted only after multiple consecutive stable ticks at Low or Medium fan level with bypass closed and balanced airflow. If fewer than five conditioned samples exist after startup, the monitor reports `sample_quality: live_fallback`; headline MQTT sensors are marked unavailable so raw telemetry is not mistaken for a filter-health signal. Use `sensor.zehnder_raw_sfp` for live diagnostics while waiting for conditioned samples. This keeps trend comparisons apples-to-apples over weeks and months. *(Note: Because of this highly conditional filtering, AppDaemon handles the 7-day regression internally rather than relying on HA's native `derivative` helper).*
+Headline SFP, duty ratio, and health score use the median of recent conditioned samples when available. Samples are accepted only after multiple consecutive stable ticks at Low or Medium fan level with bypass closed and balanced airflow. If fewer than five conditioned samples exist after startup or immediately after a filter-cycle reset, the monitor reports an untrusted sample quality such as `warming_up` or `live_fallback`; headline MQTT sensors are marked unavailable so raw telemetry is not mistaken for a filter-health signal. Use `sensor.zehnder_raw_sfp` for live diagnostics while waiting for conditioned samples. This keeps trend comparisons apples-to-apples over weeks and months. *(Note: Because of this highly conditional filtering, AppDaemon handles the 7-day regression internally rather than relying on HA's native `derivative` helper).*
 
 Heat recovery is stricter: it is only published as a trusted metric when the outdoor, supply, and extract temperature readings are fresh and collected during stable operation. If the Zehnder integration has stale temperature states, `sensor.zehnder_heat_recovery` is marked unavailable and `sensor.zehnder_heat_recovery_quality` reports `unavailable`.
 
@@ -164,7 +164,7 @@ When enough stable clean-filter samples are available at a fan level, the monito
 
 ## Baseline-Aware Capacity
 
-`sensor.zehnder_filter_health` is preserved as the existing absolute/generic performance health score for compatibility with dashboards and alert automations.
+`sensor.zehnder_filter_health` is preserved as the existing absolute/generic performance health score for compatibility with dashboards and alert automations. Within a filter cycle it publishes the worst trusted score seen so far, not the most optimistic recent estimate, so it does not climb because a later conditioned sample happened to look cleaner.
 
 `sensor.zehnder_filter_capacity_remaining` is additive. It answers a different question: how much filter capacity remains after accounting for this home's clean-filter baseline system resistance and normal external static pressure load?
 
@@ -175,7 +175,7 @@ Duty_capacity = (RATIO_REPLACE - current_ratio) / (RATIO_REPLACE - baseline_rati
 Filter_capacity = (SFP_capacity * 0.65) + (Duty_capacity * 0.35)
 ```
 
-Capacity is clamped to 0-100%. Better-than-baseline readings cap at 100%, so a correct filter replacement should report near 100% after the clean baseline has been captured. If the monitor only has fallback or invalid baseline data, the new capacity sensors are marked unavailable rather than publishing misleading values.
+Capacity is clamped to 0-100%. Better-than-baseline readings cap at 100%, so a correct filter replacement should report near 100% after the clean baseline has been captured. Within a filter cycle, the public capacity sensors publish the cycle minimum: `sensor.zehnder_filter_capacity_remaining`, `sensor.zehnder_sfp_capacity_remaining`, and `sensor.zehnder_duty_capacity_remaining` can decrease, but they do not increase until the Zehnder filter timer reset path clears the cycle state. Instantaneous baseline comparisons are still included in the retained MQTT payload as `instant_filter_capacity_remaining`, `instant_sfp_capacity_remaining`, and `instant_duty_capacity_remaining` for diagnostics. If the monitor only has fallback or invalid baseline data, the new capacity sensors are marked unavailable rather than publishing misleading values.
 
 `sensor.zehnder_baseline_system_resistance` expresses the captured clean-filter SFP baseline on the generic SFP health envelope. This is an inferred context metric from fan, power, and flow telemetry; the app does not directly measure duct static pressure.
 
@@ -203,14 +203,20 @@ Published to `zehnder/monitor/state` (retained) every 60 seconds:
   },
   "health": {
     "score": 64.3,
+    "instant_score": 65.1,
+    "score_mode": "cycle_minimum",
     "status": "Good",
     "sfp_trend_per_day": 0.000312,
     "conditioned_samples": 847
   },
   "capability": {
     "filter_capacity_remaining": 99.5,
+    "instant_filter_capacity_remaining": 100.0,
     "sfp_capacity_remaining": 100.0,
+    "instant_sfp_capacity_remaining": 100.0,
     "duty_capacity_remaining": 98.6,
+    "instant_duty_capacity_remaining": 99.1,
+    "capacity_mode": "cycle_minimum",
     "baseline_system_resistance": 46.1,
     "baseline_quality": "single_sample"
   },
