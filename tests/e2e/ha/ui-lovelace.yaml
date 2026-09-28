@@ -50,3 +50,24 @@ views:
         entities:
           - entity: sensor.zehnder_sfp
             name: Legacy SFP
+      - type: markdown
+        title: Clean-filter reference
+        content: >-
+          {% set state = states('sensor.zehnder_corrected_calibration') %}
+          {% if state == 'awaiting_confirmation' %}
+          **Awaiting confirmed clean-filter reference.** Confirm that both
+          supply and exhaust filter paths have clean filters after maintenance
+          to begin learning. Absolute SFP remains available; no corrected
+          comparison or replacement estimate is available yet.
+          {% elif state in ['settling', 'learning', 'partial', 'qualified'] %}
+          Calibration: **{{ state }}**.
+          {% else %}Calibration state unavailable.{% endif %}
+      - type: entities
+        title: Reference provenance
+        entities:
+          - entity: sensor.zehnder_corrected_calibration
+            name: Corrected calibration state
+          - entity: sensor.zehnder_corrected_sfp_change
+            name: SFP change vs confirmed clean reference
+          - entity: sensor.zehnder_baseline_quality
+            name: Legacy baseline quality (context only)

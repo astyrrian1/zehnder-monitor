@@ -35,3 +35,11 @@ the isolated AppDaemon secret, and exercises invalid inputs, expiry, HA restart,
 and recovery. It takes roughly 15 minutes at the fixed 60-second cadence.
 REST-created simulated entities should be seeded before AppDaemon starts after
 an HA restart, so its initial snapshot includes them.
+
+For milestone 3, set `ZMON_TEST_STACK_SSH`, `ZMON_TEST_HA_URL`, and a current
+`ZMON_TEST_HA_TOKEN`, then run `python3 -u run_m3.py`. It resets only this
+isolated project's persistence directory to demonstrate fresh installation
+and a legacy May-baseline upgrade. The corrected reference stays empty in both.
+Run `python3 -u assert_pending_quiet.py --seconds 601` to hold that state
+through the ten-minute fault-notification delay while renewing simulated
+source reports. These scripts never confirm maintenance or issue fan commands.

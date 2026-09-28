@@ -112,6 +112,7 @@ class ZehnderMonitor(hass.Hass):
     BASELINE_LEARNING_MIN_DAYS = FILTER_CYCLE - 14
     STATE_FILE     = "state.json"
     BASELINE_FILE  = "baselines.json"
+    CORRECTED_FILE = "corrected_v2.json"
     DATA_DIR_ARG   = "data_dir"
 
     # =================================================================
@@ -165,6 +166,7 @@ class ZehnderMonitor(hass.Hass):
             self._save_json(self.BASELINE_FILE, self.baselines)
         saved = self._load_json(self.STATE_FILE, {})
         self._restore(saved)
+        self.v2_state = self._load_corrected_state()
 
         self.log(
             f"Baselines: SFP={self.baselines['sfp']:.3f}, "
@@ -259,6 +261,43 @@ class ZehnderMonitor(hass.Hass):
             self.log(f"Save {name} failed: {joined}", level="ERROR")
         except Exception as e:
             self.log(f"Save {name} failed: {e}", level="ERROR")
+
+    @staticmethod
+    def _corrected_defaults():
+        return {
+            "schema_version": 2,
+            "calibration": {
+                "state": "awaiting_confirmation",
+                "cycle_id": None,
+                "confirmed_at": None,
+                "references": {},
+            },
+            "archived_references": [],
+        }
+
+    def _load_corrected_state(self):
+        """Read only the v2 file; never infer a reference from legacy data."""
+        path = os.path.join(self._data_dir(), self.CORRECTED_FILE)
+        try:
+            with open(path, "r") as stream:
+                data = json.load(stream)
+        except FileNotFoundError:
+            defaults = self._corrected_defaults()
+            self._save_json(self.CORRECTED_FILE, defaults)
+            return defaults
+        except (OSError, json.JSONDecodeError) as exc:
+            self.log(f"Corrected state unavailable at {path}: {exc}", level="ERROR")
+            return self._corrected_defaults()
+        calibration = data.get("calibration") if isinstance(data, dict) else None
+        if (not isinstance(data, dict) or data.get("schema_version") != 2 or not isinstance(calibration, dict)
+                or not isinstance(calibration.get("references"), dict)
+                or calibration.get("state") not in ("awaiting_confirmation", "settling", "learning", "partial", "qualified")):
+            self.log(f"Corrected state invalid at {path}; awaiting confirmation", level="ERROR")
+            return self._corrected_defaults()
+        return data
+
+    def _save_corrected_state(self):
+        self._save_json(self.CORRECTED_FILE, self.v2_state)
 
     def _persist(self):
         cutoff = time.time() - (self.BUFFER_HOURS * 3600)
@@ -998,6 +1037,32 @@ class ZehnderMonitor(hass.Hass):
                 "icon": "mdi:check-decagram",
                 "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
             }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/calibration/config", payload=json.dumps({
+                "name": "Zehnder Corrected Calibration",
+                "unique_id": "zehnder_monitor_v2_calibration",
+                "default_entity_id": "sensor.zehnder_corrected_calibration",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.calibration.state }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'calculated_at': value_json.calculated_at, 'cycle_id': value_json.calibration.cycle_id, 'confirmed_at': value_json.calibration.confirmed_at, 'references': value_json.calibration.references} | tojson }}",
+                "expire_after": 180,
+                "icon": "mdi:database-clock",
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/sfp_change/config", payload=json.dumps({
+                "name": "Zehnder Corrected SFP Change",
+                "unique_id": "zehnder_monitor_v2_sfp_change",
+                "default_entity_id": "sensor.zehnder_corrected_sfp_change",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.comparison.sfp_change_pct }}",
+                "availability_topic": "zehnder/monitor/v2/state",
+                "availability_template": "{{ 'online' if value_json.calibration.state == 'qualified' and value_json.comparison.sfp_change_pct is not none else 'offline' }}",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "expire_after": 180,
+                "icon": "mdi:chart-line",
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
             self.v2_discovery_published = True
         result = evaluate_sfp(inputs, datetime.now(timezone.utc).isoformat())
         fan_effort = evaluate_fan_effort(inputs, result["calculated_at"])
@@ -1022,6 +1087,8 @@ class ZehnderMonitor(hass.Hass):
             "baseline_eligible": eligible,
             "eligibility_reason": eligibility_reason,
             "accepted_reports": getattr(self, "v2_accepted_reports", 0),
+            "calibration": getattr(self, "v2_state", self._corrected_defaults())["calibration"],
+            "comparison": {"sfp_change_pct": None},
         }
         self.call_service("mqtt/publish", topic="zehnder/monitor/v2/state", payload=json.dumps(payload, allow_nan=False), retain=False)
         return result["quality"]

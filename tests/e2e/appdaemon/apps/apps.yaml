@@ -1,3 +1,4 @@
 zehnder_monitor:
   module: zehnder_monitor
   class: ZehnderMonitor
+  data_dir: /conf/zehnder-monitor
