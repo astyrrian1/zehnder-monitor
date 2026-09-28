@@ -199,3 +199,62 @@ def evaluate_sampling_eligibility(inputs, sfp_result, recent, calculated_at):
         if median <= 0 or any(abs(item[key] - median) / median > 0.08 for item in recent):
             return False, "unstable", recent
     return True, "stable_conditions", recent
+
+
+def select_reference(calibration, fan_level, supply_flow_m3h, exhaust_flow_m3h):
+    """Choose one same-cycle/level reference by both flow medians, without blending."""
+    if fan_level not in ('Low', 'Medium') or not calibration.get('cycle_id'):
+        return None
+    candidates = []
+    for point, metrics in calibration.get('references', {}).items():
+        if not point.startswith(fan_level + ':') or 'sfp' not in metrics:
+            continue
+        ref = metrics['sfp']
+        supply_ref = ref.get('supply_flow_m3h')
+        exhaust_ref = ref.get('exhaust_flow_m3h')
+        if not supply_ref or not exhaust_ref:
+            continue
+        supply_gap = abs(supply_flow_m3h - supply_ref) / supply_ref
+        exhaust_gap = abs(exhaust_flow_m3h - exhaust_ref) / exhaust_ref
+        if supply_gap <= 0.05 + 1e-12 and exhaust_gap <= 0.05 + 1e-12:
+            candidates.append((supply_gap + exhaust_gap, point, metrics))
+    if not candidates:
+        return None
+    _, point, metrics = min(candidates, key=lambda item: (item[0], item[1]))
+    return {'cycle_id': calibration['cycle_id'], 'point': point, 'metrics': metrics}
+
+
+def calculate_reference_change(sample, selected):
+    """Signed changes: SFP/RPM per airflow in percent; duties in percentage points."""
+    metrics = selected['metrics']
+    sfp_ref = metrics['sfp']['sfp']
+    result = {'sfp_change_pct': (sample['sfp'] / sfp_ref - 1) * 100}
+    duty_ref = metrics.get('duty')
+    if duty_ref and sample.get('supply_duty') is not None and sample.get('exhaust_duty') is not None:
+        result['supply_duty_change_pp'] = sample['supply_duty'] - duty_ref['supply_duty']
+        result['exhaust_duty_change_pp'] = sample['exhaust_duty'] - duty_ref['exhaust_duty']
+    rpm_ref = metrics.get('rpm_flow')
+    if rpm_ref and sample.get('supply_rpm') is not None and sample.get('exhaust_rpm') is not None:
+        for fan in ('supply', 'exhaust'):
+            current = sample[fan + '_rpm'] / sample[fan + '_flow_m3h']
+            baseline = rpm_ref[fan + '_rpm'] / rpm_ref[fan + '_flow_m3h']
+            result[fan + '_rpm_flow_change_pct'] = (current / baseline - 1) * 100
+    return result
+
+
+def conditioned_comparison(sample, selected, history, now, window_seconds=900):
+    """Median of at least five distinct matched observations in the past 15 minutes."""
+    from datetime import timedelta
+    reference_key = selected['cycle_id'] + ':' + selected['point']
+    cutoff = now - timedelta(seconds=window_seconds)
+    history = [item for item in history
+               if item.get('reference_key') == reference_key
+               and cutoff <= datetime.fromisoformat(item['reported_at']) <= now]
+    fingerprint = sample.get('fingerprint')
+    if fingerprint and not any(item['fingerprint'] == fingerprint for item in history):
+        history.append({**sample, 'reference_key': reference_key})
+    if len(history) < 5:
+        return None, history
+    values = [calculate_reference_change(item, selected) for item in history]
+    keys = set.intersection(*(set(item) for item in values))
+    return {key: statistics.median(item[key] for item in values) for key in keys}, history

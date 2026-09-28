@@ -80,11 +80,20 @@ views:
           {% endif %}
       - type: markdown
         title: Reference capture details
-        content: >-
+        content: |-
           Cycle: {{ state_attr('sensor.zehnder_corrected_calibration', 'cycle_id') or 'none' }}.
           Confirmed: {{ state_attr('sensor.zehnder_corrected_calibration', 'confirmed_at') or 'not yet' }}.
-          Candidate counts: {{ state_attr('sensor.zehnder_corrected_calibration', 'candidate_counts') or {} }}.
-          Qualified references: {{ state_attr('sensor.zehnder_corrected_calibration', 'references') or {} }}.
+          {% set counts = state_attr('sensor.zehnder_corrected_calibration', 'candidate_counts') or {} %}
+          {% set refs = state_attr('sensor.zehnder_corrected_calibration', 'references') or {} %}
+          {% for point, metrics in refs.items() %}
+          **{{ point }}:**
+          {% for name, ref in metrics.items() %}
+          - {{ name }}: {{ ref.count }} reports, {{ ref.first_reported_at }} to {{ ref.last_reported_at }};
+            median supply {{ ref.supply_flow_m3h | round(1) }} m³/h,
+            exhaust {{ ref.exhaust_flow_m3h | round(1) }} m³/h.
+          {% endfor %}
+          {% endfor %}
+          {% if not refs %}No qualified reference yet. Candidate counts: {{ counts }}.{% endif %}
       - type: button
         name: Confirm both filter paths are clean
         icon: mdi:air-filter
@@ -105,3 +114,29 @@ views:
             name: SFP change vs confirmed clean reference
           - entity: sensor.zehnder_baseline_quality
             name: Legacy baseline quality (context only)
+      - type: entities
+        title: Matched-flow fan effort
+        entities:
+          - entity: sensor.zehnder_corrected_sfp_change
+            name: SFP change (%)
+          - entity: sensor.zehnder_corrected_supply_duty_change_pp
+            name: Supply duty change (percentage points)
+          - entity: sensor.zehnder_corrected_exhaust_duty_change_pp
+            name: Exhaust duty change (percentage points)
+          - entity: sensor.zehnder_corrected_supply_rpm_flow_change_pct
+            name: Supply RPM per airflow change (%)
+          - entity: sensor.zehnder_corrected_exhaust_rpm_flow_change_pct
+            name: Exhaust RPM per airflow change (%)
+      - type: markdown
+        title: Comparison support
+        content: >-
+          {% set q = states('sensor.zehnder_corrected_comparison_quality') %}
+          {% if q == 'ready' %}Conditioned 15-minute comparison is ready.
+          {% elif q == 'warming_up' %}Warming up: at least five distinct matched observations are required.
+          {% elif q == 'no_matching_reference' %}No matching clean-filter reference for this fan level and both airflows.
+          {% elif q == 'ineligible' %}Current conditions are not eligible for a conditioned comparison.
+          {% else %}Comparison unavailable while current measurement is unavailable.
+          {% endif %}
+          {% set ref = state_attr('sensor.zehnder_corrected_comparison_quality', 'selected_reference') %}
+          Selected reference: {% if ref %}{{ ref.point }} from cycle {{ ref.cycle_id }}{% else %}none{% endif %}.
+          Accepted observations in window: {{ state_attr('sensor.zehnder_corrected_comparison_quality', 'window_count') or 0 }}.

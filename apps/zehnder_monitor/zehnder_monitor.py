@@ -28,9 +28,9 @@ import math
 from datetime import datetime, timedelta, timezone
 
 try:
-    from corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility
+    from corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison
 except ImportError:
-    from .corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility
+    from .corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison
 
 try:
     from capability import (
@@ -161,6 +161,7 @@ class ZehnderMonitor(hass.Hass):
         self.v2_last_fingerprint = None
         self.v2_accepted_reports = 0
         self.v2_recent_samples = []
+        self.v2_comparison_samples = []
 
         loaded_baselines = self._load_json(self.BASELINE_FILE, self._defaults())
         self.baselines = self._migrate_baselines(loaded_baselines)
@@ -1214,14 +1215,45 @@ class ZehnderMonitor(hass.Hass):
                 "default_entity_id": "sensor.zehnder_corrected_sfp_change",
                 "state_topic": "zehnder/monitor/v2/state",
                 "value_template": "{{ value_json.comparison.sfp_change_pct }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'quality': value_json.comparison.quality, 'selected_reference': value_json.comparison.selected_reference, 'window_count': value_json.comparison.window_count, 'window_minutes': 15} | tojson }}",
                 "availability_topic": "zehnder/monitor/v2/state",
-                "availability_template": "{{ 'online' if value_json.calibration.state == 'qualified' and value_json.comparison.sfp_change_pct is not none else 'offline' }}",
+                "availability_template": "{{ 'online' if value_json.comparison.sfp_change_pct is not none else 'offline' }}",
                 "unit_of_measurement": "%",
                 "state_class": "measurement",
                 "expire_after": 180,
                 "icon": "mdi:chart-line",
                 "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
             }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/comparison_quality/config", payload=json.dumps({
+                "name": "Zehnder Corrected Comparison Quality",
+                "unique_id": "zehnder_monitor_v2_comparison_quality",
+                "default_entity_id": "sensor.zehnder_corrected_comparison_quality",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.comparison.quality }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'selected_reference': value_json.comparison.selected_reference, 'window_count': value_json.comparison.window_count, 'window_minutes': 15} | tojson }}",
+                "expire_after": 180,
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            for field, name, unit in (
+                ("supply_duty_change_pp", "Supply Duty Change", "pp"),
+                ("exhaust_duty_change_pp", "Exhaust Duty Change", "pp"),
+                ("supply_rpm_flow_change_pct", "Supply RPM per Flow Change", "%"),
+                ("exhaust_rpm_flow_change_pct", "Exhaust RPM per Flow Change", "%"),
+            ):
+                self.call_service("mqtt/publish", topic=f"homeassistant/sensor/zehnder_monitor_v2/{field}/config", payload=json.dumps({
+                    "name": "Zehnder Corrected " + name,
+                    "unique_id": "zehnder_monitor_v2_" + field,
+                    "default_entity_id": "sensor.zehnder_corrected_" + field,
+                    "state_topic": "zehnder/monitor/v2/state",
+                    "value_template": "{{ value_json.comparison." + field + " }}",
+                    "availability_topic": "zehnder/monitor/v2/state",
+                    "availability_template": "{{ 'online' if value_json.comparison." + field + " is not none else 'offline' }}",
+                    "unit_of_measurement": unit,
+                    "state_class": "measurement", "expire_after": 180,
+                    "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+                }), retain=True)
             self.v2_discovery_published = True
         result = evaluate_sfp(inputs, datetime.now(timezone.utc).isoformat())
         if hasattr(self, "v2_state"):
@@ -1232,6 +1264,7 @@ class ZehnderMonitor(hass.Hass):
             inputs, result, getattr(self, "v2_recent_samples", []), result["calculated_at"]
         )
         self.v2_recent_samples = recent if eligibility_reason in ("warming_up", "stable_conditions", "unstable") else []
+        sample = None
         if result["quality"] == "current" and result["fingerprint"] != getattr(self, "v2_last_fingerprint", None):
             self.v2_accepted_reports = getattr(self, "v2_accepted_reports", 0) + 1
             self.v2_last_fingerprint = result["fingerprint"]
@@ -1257,8 +1290,38 @@ class ZehnderMonitor(hass.Hass):
                     "supply_rpm": number("supply_rpm"),
                     "exhaust_rpm": number("exhaust_rpm"),
                 }
+                self.v2_last_sample = sample
                 self._collect_corrected_candidate(sample, datetime.fromisoformat(result["calculated_at"]))
+        if eligible and sample is None and getattr(self, "v2_last_sample", {}).get("fingerprint") == result.get("fingerprint"):
+            sample = self.v2_last_sample
         calibration = getattr(self, "v2_state", self._corrected_defaults())["calibration"]
+        comparison = {"quality": "unavailable", "selected_reference": None, "window_count": 0,
+                      "sfp_change_pct": None, "supply_duty_change_pp": None,
+                      "exhaust_duty_change_pp": None, "supply_rpm_flow_change_pct": None,
+                      "exhaust_rpm_flow_change_pct": None}
+        if result["quality"] == "current":
+            supply_flow = float(inputs["supply_flow"]["value"]) * UNITS["supply_flow"][inputs["supply_flow"]["unit"]]
+            exhaust_flow = float(inputs["exhaust_flow"]["value"]) * UNITS["exhaust_flow"][inputs["exhaust_flow"]["unit"]]
+            level = inputs.get("fan_level", {}).get("value") if isinstance(inputs.get("fan_level"), dict) else None
+            selected = select_reference(calibration, level, supply_flow, exhaust_flow)
+            if selected is None:
+                comparison["quality"] = "no_matching_reference"
+            else:
+                comparison["selected_reference"] = selected
+                if eligible and sample is not None:
+                    values, self.v2_comparison_samples = conditioned_comparison(
+                        sample, selected, getattr(self, "v2_comparison_samples", []),
+                        datetime.fromisoformat(result["calculated_at"]),
+                        int(self.args.get("test_comparison_window_seconds", 900)) if self.args.get("isolated_test_mode") else 900,
+                    )
+                else:
+                    values = None
+                comparison["window_count"] = len(getattr(self, "v2_comparison_samples", []))
+                if values is None:
+                    comparison["quality"] = "warming_up" if eligible else "ineligible"
+                else:
+                    comparison.update({key: round(value, 3) for key, value in values.items()})
+                    comparison["quality"] = "ready"
         visible_calibration = {key: value for key, value in calibration.items() if key != "candidates"}
         visible_calibration.setdefault("settling_until", None)
         visible_calibration.setdefault("learning_until", None)
@@ -1280,7 +1343,7 @@ class ZehnderMonitor(hass.Hass):
             "eligibility_reason": eligibility_reason,
             "accepted_reports": getattr(self, "v2_accepted_reports", 0),
             "calibration": visible_calibration,
-            "comparison": {"sfp_change_pct": None},
+            "comparison": comparison,
         }
         self.call_service("mqtt/publish", topic="zehnder/monitor/v2/state", payload=json.dumps(payload, allow_nan=False), retain=False)
         return result["quality"]

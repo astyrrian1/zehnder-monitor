@@ -12,6 +12,9 @@ SUFFIXES = {
     "supply_flow": "supply_fan_flow",
     "exhaust_flow": "exhaust_fan_flow",
     "supply_rpm": "supply_fan_speed",
+    "exhaust_rpm": "exhaust_fan_speed",
+    "supply_duty": "supply_fan_duty",
+    "exhaust_duty": "exhaust_fan_duty",
     "bypass": "bypass_state",
     "filter_days": "filter_replacement_remaining_days",
 }

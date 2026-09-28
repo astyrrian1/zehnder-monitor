@@ -32,6 +32,13 @@ MEASUREMENTS = {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("power", type=float)
+    parser.add_argument("--supply-duty", type=float, default=45)
+    parser.add_argument("--exhaust-duty", type=float, default=42)
+    parser.add_argument("--fan-level", default="Medium")
+    parser.add_argument("--supply-flow", type=float, default=350)
+    parser.add_argument("--exhaust-flow", type=float, default=350)
+    parser.add_argument("--supply-rpm", type=float, default=1250)
+    parser.add_argument("--exhaust-rpm", type=float, default=1250)
     args = parser.parse_args()
     base = os.environ["ZMON_TEST_HA_URL"].rstrip("/")
     if not base.endswith(":18123"):
@@ -54,7 +61,17 @@ def main():
 
     put("binary_sensor.zehnder_comfoair_q_a4cb9c_status", "on")
     put(PREFIX + "power", args.power, "W")
-    for suffix, (value, unit) in MEASUREMENTS.items():
+    overrides = {
+        'supply_fan_flow': args.supply_flow,
+        'exhaust_fan_flow': args.exhaust_flow,
+        'supply_fan_duty': args.supply_duty,
+        'exhaust_fan_duty': args.exhaust_duty,
+        'supply_fan_speed': args.supply_rpm,
+        'exhaust_fan_speed': args.exhaust_rpm,
+        'fan_level': args.fan_level,
+    }
+    for suffix, (default, unit) in MEASUREMENTS.items():
+        value = overrides.get(suffix, default)
         put(PREFIX + suffix, value, unit)
     print("Seeded isolated HA source entities, power", args.power)
 

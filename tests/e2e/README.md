@@ -55,3 +55,11 @@ freezes references, repeats without RPM for partial qualification, and checks
 corrupt-file recovery plus timer-only confirmation prompting. Open the isolated
 HA dashboard to inspect the confirmation dialog and rendered progress. It
 never sends fan, bypass, or timer-control commands.
+
+For milestone 5, run `python3 -u run_m5.py` with the same isolated URL,
+`ZMON_TEST_TOKEN_FILE`, and `ZMON_TEST_STACK_SSH`. It creates a reference via
+`run_m4.py --reference-only`, then verifies conditioned deterioration, recovery,
+fan-level isolation, an airflow-band boundary, and an out-of-tolerance flow.
+The isolated publisher uses a 20-second comparison window so a 15-minute
+production window can be exercised quickly. Open the dashboard during the
+ready step to inspect the signed SFP, duty, and RPM-per-flow changes.

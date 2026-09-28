@@ -7,3 +7,4 @@ zehnder_monitor:
   test_settling_seconds: 6
   test_learning_seconds: 120
   test_min_span_seconds: 32
+  test_comparison_window_seconds: 20

@@ -100,6 +100,9 @@ def main():
     assert json.dumps(persisted()['calibration']['references']['Medium:350'], sort_keys=True) == frozen
     assert request('/api/states/sensor.zehnder_corrected_calibration')['state'] == 'qualified'
     assert request('/api/states/sensor.zehnder_corrected_sfp')['state'] not in ('unknown', 'unavailable')
+    if '--reference-only' in sys.argv:
+        print(json.dumps({'result': 'pass', 'cycle_id': event_id, 'reference_metrics': list(ref), 'accepted_sfp_samples': ref['sfp']['count']}))
+        return
     # New confirmed cycle with missing optional RPM still learns SFP and duty.
     second_id = event_id + '-partial'
     request('/api/events/' + EVENT, {'event_id': second_id, 'both_filter_paths_clean': True})
