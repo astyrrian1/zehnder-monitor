@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--exhaust-flow", type=float, default=350)
     parser.add_argument("--supply-rpm", type=float, default=1250)
     parser.add_argument("--exhaust-rpm", type=float, default=1250)
+    parser.add_argument("--reported-at", help="test-only source report time for virtual-clock replay")
     args = parser.parse_args()
     base = os.environ["ZMON_TEST_HA_URL"].rstrip("/")
     if not base.endswith(":18123"):
@@ -47,6 +48,8 @@ def main():
 
     def put(entity_id, value, unit=None):
         body = {"state": str(value), "attributes": {"test_report_id": time.time_ns()}}
+        if args.reported_at:
+            body["attributes"]["source_reported_at"] = args.reported_at
         if unit:
             body["attributes"]["unit_of_measurement"] = unit
         request = urllib.request.Request(

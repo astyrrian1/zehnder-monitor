@@ -258,3 +258,45 @@ def conditioned_comparison(sample, selected, history, now, window_seconds=900):
     values = [calculate_reference_change(item, selected) for item in history]
     keys = set.intersection(*(set(item) for item in values))
     return {key: statistics.median(item[key] for item in values) for key in keys}, history
+
+
+def hourly_sfp_trend(reports, cycle_id, point, now):
+    """Equal-weight UTC hourly medians regressed on actual elapsed days."""
+    from datetime import timedelta, timezone
+    result = {'quality': 'insufficient_coverage', 'slope_w_per_m3s_day': None,
+              'bucket_count': 0, 'span_hours': 0, 'first_hour': None, 'last_hour': None}
+    if now.tzinfo is None:
+        raise ValueError('now must be timezone aware')
+    now = now.astimezone(timezone.utc)
+    cutoff = now - timedelta(days=7)
+    buckets = {}
+    for report in reports:
+        if report.get('cycle_id') != cycle_id or report.get('point') != point:
+            continue
+        try:
+            timestamp = datetime.fromisoformat(report['reported_at']).astimezone(timezone.utc)
+            value = float(report['sfp'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(value) or not cutoff <= timestamp <= now:
+            continue
+        hour = timestamp.replace(minute=0, second=0, microsecond=0)
+        buckets.setdefault(hour, []).append(value)
+    if not buckets:
+        return result
+    hours = sorted(buckets)
+    span = (hours[-1] - hours[0]).total_seconds() / 3600
+    result.update(bucket_count=len(hours), span_hours=span,
+                  first_hour=hours[0].isoformat(), last_hour=hours[-1].isoformat())
+    if len(hours) < 24 or span < 72:
+        return result
+    xs = [(hour - hours[0]).total_seconds() / 86400 for hour in hours]
+    ys = [statistics.median(buckets[hour]) for hour in hours]
+    xbar = statistics.mean(xs)
+    ybar = statistics.mean(ys)
+    denominator = sum((x - xbar) ** 2 for x in xs)
+    if denominator == 0:
+        return result
+    slope = sum((x - xbar) * (y - ybar) for x, y in zip(xs, ys)) / denominator
+    result.update(quality='ready', slope_w_per_m3s_day=slope * 1000)
+    return result

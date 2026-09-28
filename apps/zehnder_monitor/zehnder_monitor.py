@@ -28,9 +28,9 @@ import math
 from datetime import datetime, timedelta, timezone
 
 try:
-    from corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison
+    from corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend
 except ImportError:
-    from .corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison
+    from .corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend
 
 try:
     from capability import (
@@ -283,6 +283,7 @@ class ZehnderMonitor(hass.Hass):
             "archived_references": [],
             "last_filter_days": None,
             "timer_confirmation_requested": False,
+            "trend_reports": [],
         }
 
     def _load_corrected_state(self):
@@ -457,6 +458,35 @@ class ZehnderMonitor(hass.Hass):
             self.v2_state["timer_confirmation_requested"] = True
         if previous != days:
             self.v2_state["last_filter_days"] = days
+            self._save_corrected_state()
+
+    def _corrected_now(self):
+        """Real UTC clock, with a source-driven override only in the isolated stack."""
+        if getattr(self, "args", {}).get("isolated_test_mode"):
+            raw = self.get_state("sensor.zehnder_monitor_test_clock")
+            try:
+                synthetic = datetime.fromisoformat(raw)
+                if synthetic.tzinfo is not None:
+                    return synthetic.astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                pass
+        return datetime.now(timezone.utc)
+
+    def _prune_corrected_trend(self, now):
+        if not hasattr(self, "v2_state"):
+            return
+        cutoff = now - timedelta(days=7)
+        retained = []
+        reports = self.v2_state.get("trend_reports", [])
+        for report in reports if isinstance(reports, list) else []:
+            try:
+                timestamp = datetime.fromisoformat(report["reported_at"])
+                if timestamp.tzinfo and cutoff <= timestamp <= now:
+                    retained.append(report)
+            except (KeyError, TypeError, ValueError):
+                continue
+        if retained != reports:
+            self.v2_state["trend_reports"] = retained
             self._save_corrected_state()
 
     def _persist(self):
@@ -1254,8 +1284,33 @@ class ZehnderMonitor(hass.Hass):
                     "state_class": "measurement", "expire_after": 180,
                     "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
                 }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/sfp_trend/config", payload=json.dumps({
+                "name": "Zehnder Corrected SFP Trend",
+                "unique_id": "zehnder_monitor_v2_sfp_trend",
+                "default_entity_id": "sensor.zehnder_corrected_sfp_trend",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.trend.slope_w_per_m3s_day }}",
+                "availability_topic": "zehnder/monitor/v2/state",
+                "availability_template": "{{ 'online' if value_json.trend.quality == 'ready' else 'offline' }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'quality': value_json.trend.quality, 'bucket_count': value_json.trend.bucket_count, 'span_hours': value_json.trend.span_hours, 'first_hour': value_json.trend.first_hour, 'last_hour': value_json.trend.last_hour, 'cycle_id': value_json.trend.cycle_id, 'point': value_json.trend.point} | tojson }}",
+                "unit_of_measurement": "W/(m³/s)/day", "state_class": "measurement",
+                "expire_after": 180,
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/trend_quality/config", payload=json.dumps({
+                "name": "Zehnder Corrected Trend Quality",
+                "unique_id": "zehnder_monitor_v2_trend_quality",
+                "default_entity_id": "sensor.zehnder_corrected_trend_quality",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.trend.quality }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'bucket_count': value_json.trend.bucket_count, 'span_hours': value_json.trend.span_hours, 'first_hour': value_json.trend.first_hour, 'last_hour': value_json.trend.last_hour, 'cycle_id': value_json.trend.cycle_id, 'point': value_json.trend.point} | tojson }}",
+                "expire_after": 180,
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
             self.v2_discovery_published = True
-        result = evaluate_sfp(inputs, datetime.now(timezone.utc).isoformat())
+        result = evaluate_sfp(inputs, self._corrected_now().isoformat())
         if hasattr(self, "v2_state"):
             self._observe_corrected_timer(inputs.get("filter_days"))
         fan_effort = evaluate_fan_effort(inputs, result["calculated_at"])
@@ -1299,6 +1354,9 @@ class ZehnderMonitor(hass.Hass):
                       "sfp_change_pct": None, "supply_duty_change_pp": None,
                       "exhaust_duty_change_pp": None, "supply_rpm_flow_change_pct": None,
                       "exhaust_rpm_flow_change_pct": None}
+        trend = {"quality": "unavailable", "slope_w_per_m3s_day": None,
+                 "bucket_count": 0, "span_hours": 0, "first_hour": None,
+                 "last_hour": None, "cycle_id": calibration.get("cycle_id"), "point": None}
         if result["quality"] == "current":
             supply_flow = float(inputs["supply_flow"]["value"]) * UNITS["supply_flow"][inputs["supply_flow"]["unit"]]
             exhaust_flow = float(inputs["exhaust_flow"]["value"]) * UNITS["exhaust_flow"][inputs["exhaust_flow"]["unit"]]
@@ -1306,8 +1364,10 @@ class ZehnderMonitor(hass.Hass):
             selected = select_reference(calibration, level, supply_flow, exhaust_flow)
             if selected is None:
                 comparison["quality"] = "no_matching_reference"
+                trend["quality"] = "no_matching_reference"
             else:
                 comparison["selected_reference"] = selected
+                trend["point"] = selected["point"]
                 if eligible and sample is not None:
                     values, self.v2_comparison_samples = conditioned_comparison(
                         sample, selected, getattr(self, "v2_comparison_samples", []),
@@ -1322,6 +1382,25 @@ class ZehnderMonitor(hass.Hass):
                 else:
                     comparison.update({key: round(value, 3) for key, value in values.items()})
                     comparison["quality"] = "ready"
+                if hasattr(self, "v2_state"):
+                    now = datetime.fromisoformat(result["calculated_at"])
+                    cutoff = now - timedelta(days=7)
+                    reports = [report for report in self.v2_state.get("trend_reports", [])
+                               if datetime.fromisoformat(report["reported_at"]) >= cutoff]
+                    if eligible and sample is not None and not any(
+                        report["fingerprint"] == sample["fingerprint"]
+                        and report["cycle_id"] == selected["cycle_id"]
+                        and report["point"] == selected["point"] for report in reports
+                    ):
+                        reports.append({"fingerprint": sample["fingerprint"],
+                                        "reported_at": sample["reported_at"], "sfp": sample["sfp"],
+                                        "cycle_id": selected["cycle_id"], "point": selected["point"]})
+                        self.v2_state["trend_reports"] = reports
+                        self._save_corrected_state()
+                    trend.update(hourly_sfp_trend(reports, selected["cycle_id"], selected["point"], now))
+                    if trend["slope_w_per_m3s_day"] is not None:
+                        trend["slope_w_per_m3s_day"] = round(trend["slope_w_per_m3s_day"], 1)
+                    trend.update(cycle_id=selected["cycle_id"], point=selected["point"])
         visible_calibration = {key: value for key, value in calibration.items() if key != "candidates"}
         visible_calibration.setdefault("settling_until", None)
         visible_calibration.setdefault("learning_until", None)
@@ -1344,6 +1423,7 @@ class ZehnderMonitor(hass.Hass):
             "accepted_reports": getattr(self, "v2_accepted_reports", 0),
             "calibration": visible_calibration,
             "comparison": comparison,
+            "trend": trend,
         }
         self.call_service("mqtt/publish", topic="zehnder/monitor/v2/state", payload=json.dumps(payload, allow_nan=False), retain=False)
         return result["quality"]
@@ -1619,6 +1699,7 @@ class ZehnderMonitor(hass.Hass):
         self.tick_count += 1
         self.log(f"Evaluation tick {self.tick_count}")
         self._prune_history()
+        self._prune_corrected_trend(self._corrected_now())
         self._advance_corrected_calibration(datetime.now(timezone.utc))
         try:
             v2_quality = self._publish_corrected_sfp()

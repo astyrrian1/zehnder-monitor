@@ -46,6 +46,10 @@ def main():
         with urllib.request.urlopen(req) as response:
             return json.load(response)
 
+    # A prior virtual-time trend replay cannot alter this real-time setup.
+    request('/api/states/sensor.zehnder_monitor_test_clock',
+            {'state': 'unknown', 'attributes': {}})
+
     def stack(command):
         subprocess.run(['ssh', host, f'cd {STACK} && docker compose {command}'], check=True, stdout=subprocess.DEVNULL)
 

@@ -140,3 +140,27 @@ views:
           {% set ref = state_attr('sensor.zehnder_corrected_comparison_quality', 'selected_reference') %}
           Selected reference: {% if ref %}{{ ref.point }} from cycle {{ ref.cycle_id }}{% else %}none{% endif %}.
           Accepted observations in window: {{ state_attr('sensor.zehnder_corrected_comparison_quality', 'window_count') or 0 }}.
+      - type: entities
+        title: Sustained SFP trend
+        entities:
+          - entity: sensor.zehnder_corrected_sfp_trend
+            name: SFP slope (W/(m³/s)/day)
+          - entity: sensor.zehnder_corrected_trend_quality
+            name: Trend coverage
+      - type: history-graph
+        title: Corrected SFP trend history
+        hours_to_show: 168
+        entities:
+          - sensor.zehnder_corrected_sfp_trend
+      - type: markdown
+        title: Trend evidence
+        content: >-
+          {% set q = states('sensor.zehnder_corrected_trend_quality') %}
+          {% set n = state_attr('sensor.zehnder_corrected_trend_quality', 'bucket_count') or 0 %}
+          {% set span = state_attr('sensor.zehnder_corrected_trend_quality', 'span_hours') or 0 %}
+          {% if q == 'ready' %}Trend ready from {{ n }} nonempty UTC hourly medians spanning {{ span | round(1) }} hours.
+          {% elif q == 'insufficient_coverage' %}Trend warming up: {{ n }} of at least 24 nonempty UTC hours,
+          spanning {{ span | round(1) }} of at least 72 hours.
+          {% elif q == 'no_matching_reference' %}No trend for this unmatched fan level and airflow.
+          {% else %}Trend unavailable while source measurements are unavailable.
+          {% endif %}

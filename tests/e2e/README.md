@@ -63,3 +63,11 @@ fan-level isolation, an airflow-band boundary, and an out-of-tolerance flow.
 The isolated publisher uses a 20-second comparison window so a 15-minute
 production window can be exercised quickly. Open the dashboard during the
 ready step to inspect the signed SFP, duty, and RPM-per-flow changes.
+
+For milestone 6, run `python3 -u run_m6.py` with the same isolated URL,
+`ZMON_TEST_TOKEN_FILE`, and `ZMON_TEST_STACK_SSH`. The script builds a fresh
+reference, then uses the test-only HA clock entity and simulated source report
+timestamps to replay UTC hourly observations through AppDaemon and MQTT. It
+checks positive, negative, flat, sparse, and new-cycle cases. `--reuse-reference`
+is an accelerated development option when the isolated stack already has a
+qualified test reference. Production never reads the test clock entity.
