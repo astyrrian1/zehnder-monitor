@@ -1,0 +1,141 @@
+# Corrected-monitor reporting watchdog. This never diagnoses a mechanical fault.
+input_datetime:
+  zehnder_monitor_fault_first_observed:
+    name: Zehnder monitor fault first observed
+    has_date: true
+    has_time: true
+  zehnder_monitor_fault_last_resolved:
+    name: Zehnder monitor fault last resolved
+    has_date: true
+    has_time: true
+input_text:
+  zehnder_monitor_fault_incident:
+    name: Zehnder monitor fault incident
+    max: 255
+input_boolean:
+  zehnder_monitor_fault_delivered:
+    name: Zehnder monitor fault notice delivered
+  zehnder_monitor_fault_notice_live:
+    name: Zehnder monitor fault notice active this HA runtime
+    initial: false
+input_number:
+  zehnder_monitor_fault_valid_streak:
+    name: Zehnder monitor fault valid evaluations
+    min: 0
+    max: 3
+    step: 1
+    mode: box
+
+automation:
+  - id: zehnder_monitor_reporting_watchdog
+    alias: Zehnder Monitor Reporting Watchdog
+    mode: queued
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: time_pattern
+        minutes: "/1"
+      - trigger: state
+        entity_id: sensor.zehnder_corrected_sfp_quality
+    conditions: []
+    actions:
+      - variables:
+          quality: "{{ states('sensor.zehnder_corrected_sfp_quality') }}"
+          incident: "{{ states('input_text.zehnder_monitor_fault_incident') }}"
+          first: "{{ states('input_datetime.zehnder_monitor_fault_first_observed') }}"
+          delivered: "{{ is_state('input_boolean.zehnder_monitor_fault_delivered', 'on') }}"
+          streak: "{{ states('input_number.zehnder_monitor_fault_valid_streak') | int(0) }}"
+          fault: >-
+            {{ quality in ['unknown', 'unavailable', 'invalid', 'stale', 'unknown_freshness'] }}
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ fault }}"
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: "{{ streak > 0 }}"
+                then:
+                  - action: input_number.set_value
+                    target:
+                      entity_id: input_number.zehnder_monitor_fault_valid_streak
+                    data:
+                      value: 0
+              - if:
+                  - condition: template
+                    value_template: "{{ incident in ['unknown', 'unavailable', ''] }}"
+                then:
+                  - action: input_datetime.set_datetime
+                    target:
+                      entity_id: input_datetime.zehnder_monitor_fault_first_observed
+                    data:
+                      timestamp: "{{ as_timestamp(now()) }}"
+                  - action: input_text.set_value
+                    target:
+                      entity_id: input_text.zehnder_monitor_fault_incident
+                    data:
+                      value: "{{ now().isoformat() }}"
+                else:
+                  - if:
+                      - condition: template
+                        value_template: >-
+                          {{ first not in ['unknown', 'unavailable', '']
+                             and as_timestamp(now()) - as_timestamp(first, as_timestamp(now())) >= 600
+                             and (not delivered or is_state('input_boolean.zehnder_monitor_fault_notice_live', 'off')) }}
+                    then:
+                      - action: persistent_notification.create
+                        data:
+                          notification_id: zehnder_monitor_reporting_fault
+                          title: Zehnder monitor reporting needs attention
+                          message: >-
+                            Corrected monitor reporting has remained unavailable
+                            since {{ first }} (current status: {{ quality }}).
+                            Check AppDaemon, MQTT, and source reporting. This is
+                            a monitoring issue; it does not establish a fan or
+                            ventilation-unit failure.
+                      - action: input_boolean.turn_on
+                        target:
+                          entity_id: input_boolean.zehnder_monitor_fault_delivered
+                      - action: input_boolean.turn_on
+                        target:
+                          entity_id: input_boolean.zehnder_monitor_fault_notice_live
+          - conditions:
+              - condition: template
+                value_template: >-
+                  {{ quality in ['current', 'stopped', 'unsupported']
+                     and incident not in ['unknown', 'unavailable', ''] }}
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: "{{ streak >= 2 }}"
+                then:
+                  - action: persistent_notification.dismiss
+                    data:
+                      notification_id: zehnder_monitor_reporting_fault
+                  - action: input_datetime.set_datetime
+                    target:
+                      entity_id: input_datetime.zehnder_monitor_fault_last_resolved
+                    data:
+                      timestamp: "{{ as_timestamp(now()) }}"
+                  - action: input_text.set_value
+                    target:
+                      entity_id: input_text.zehnder_monitor_fault_incident
+                    data:
+                      value: ""
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: input_boolean.zehnder_monitor_fault_delivered
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: input_boolean.zehnder_monitor_fault_notice_live
+                  - action: input_number.set_value
+                    target:
+                      entity_id: input_number.zehnder_monitor_fault_valid_streak
+                    data:
+                      value: 0
+                else:
+                  - action: input_number.set_value
+                    target:
+                      entity_id: input_number.zehnder_monitor_fault_valid_streak
+                    data:
+                      value: "{{ streak + 1 }}"

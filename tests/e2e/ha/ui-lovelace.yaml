@@ -51,6 +51,21 @@ views:
           - entity: sensor.zehnder_sfp
             name: Legacy SFP
       - type: markdown
+        title: Monitor reporting
+        content: >-
+          {% set incident = states('input_text.zehnder_monitor_fault_incident') %}
+          {% if incident not in ['unknown', 'unavailable', ''] %}
+          **Reporting interruption under observation.** First observed:
+          {{ states('input_datetime.zehnder_monitor_fault_first_observed') }}.
+          {% if is_state('input_boolean.zehnder_monitor_fault_delivered', 'on') %}
+          A persistent monitor-reporting notice is active.
+          {% else %}A notice is sent only if the interruption persists for ten minutes.{% endif %}
+          {% else %}No persistent monitor-reporting incident is active.
+          {% set resolved = states('input_datetime.zehnder_monitor_fault_last_resolved') %}
+          {% if resolved not in ['unknown', 'unavailable', ''] %}Last recovery confirmed: {{ resolved }}.{% endif %}
+          {% endif %}
+          This status describes the monitor's data path, not a mechanical diagnosis.
+      - type: markdown
         title: Clean-filter reference
         content: >-
           {% set state = states('sensor.zehnder_corrected_calibration') %}

@@ -85,3 +85,11 @@ maintenance package only into the isolated stack and exercises unknown, seven-da
 due-now, timer-reset, confirmed-maintenance, later-episode, restart, and
 already-due-at-startup paths. The notification capture uses Home Assistant's
 WebSocket persistent-notification command. The test sends no external message.
+
+For milestone 9, run `python3 -u run_m9.py` with the same isolated settings.
+It uses the production ten-minute fault threshold and takes roughly 15 minutes,
+including the publisher's 180-second expiry. Then run
+`python3 -u run_m9_edge.py` for brief-fault suppression, a deliberately failed
+test-only notification service, successful retry, and new-incident recovery.
+The temporary missing service is restored by the edge test. Both scripts operate
+only on the named isolated Compose stack and use internal HA notifications.
