@@ -1,0 +1,31 @@
+title: Zehnder Test Monitor
+views:
+  - title: Corrected ventilation efficiency
+    path: zehnder
+    cards:
+      - type: entities
+        title: Corrected SFP and exact inputs
+        entities:
+          - entity: sensor.zehnder_corrected_sfp
+            name: Corrected SFP
+          - entity: sensor.zehnder_comfoair_q_a4cb9c_power
+            name: Power (W)
+          - entity: sensor.zehnder_comfoair_q_a4cb9c_supply_fan_flow
+            name: Supply airflow (m³/h)
+          - entity: sensor.zehnder_comfoair_q_a4cb9c_exhaust_fan_flow
+            name: Exhaust airflow (m³/h)
+      - type: markdown
+        title: Measurement provenance
+        content: >-
+          {% set attrs = state_attr('sensor.zehnder_corrected_sfp', 'inputs') %}
+          {% if attrs %}
+          Calculated: {{ state_attr('sensor.zehnder_corrected_sfp', 'calculated_at') }}.
+          Power: {{ attrs.power.value }} {{ attrs.power.unit }} (reported {{ attrs.power.reported_at }}).
+          Supply: {{ attrs.supply_flow.value }} {{ attrs.supply_flow.unit }} (reported {{ attrs.supply_flow.reported_at }}).
+          Exhaust: {{ attrs.exhaust_flow.value }} {{ attrs.exhaust_flow.unit }} (reported {{ attrs.exhaust_flow.reported_at }}).
+          {% else %}Awaiting corrected SFP.{% endif %}
+      - type: entities
+        title: Legacy readings (historical method)
+        entities:
+          - entity: sensor.zehnder_sfp
+            name: Legacy SFP

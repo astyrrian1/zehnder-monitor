@@ -27,6 +27,11 @@ import importlib.util
 from datetime import datetime, timezone
 
 try:
+    from corrected import corrected_sfp
+except ImportError:
+    from .corrected import corrected_sfp
+
+try:
     from capability import (
         CAPACITY_REMAINING_KEYS,
         compute_capability,
@@ -148,6 +153,7 @@ class ZehnderMonitor(hass.Hass):
         self.baseline_timer = None
         self.tick_count = 0
         self.discovery_published = False
+        self.v2_discovery_published = False
 
         loaded_baselines = self._load_json(self.BASELINE_FILE, self._defaults())
         self.baselines = self._migrate_baselines(loaded_baselines)
@@ -163,7 +169,8 @@ class ZehnderMonitor(hass.Hass):
         )
         self.log(f"Restored {len(self.sfp_buffer)} conditioned SFP samples.")
 
-        self.run_every(self._tick, "now", self.TICK_SECONDS)
+        handle = self.run_every(self._tick, "now", self.TICK_SECONDS)
+        self.log(f"Evaluation scheduled every {self.TICK_SECONDS}s: {handle}")
 
     # =================================================================
     # PERSISTENCE
@@ -929,6 +936,38 @@ class ZehnderMonitor(hass.Hass):
     # MQTT
     # =================================================================
 
+    def _publish_corrected_sfp(self):
+        """Publish a separate SFP reading with its exact source measurements."""
+        inputs = {}
+        for key in ("power", "supply_flow", "exhaust_flow"):
+            source = self.get_state(self.E[key], attribute="all")
+            if not isinstance(source, dict):
+                return
+            inputs[key] = {
+                "value": float(source["state"]),
+                "unit": source.get("attributes", {}).get("unit_of_measurement"),
+                "reported_at": source.get("last_updated"),
+            }
+        if not getattr(self, "v2_discovery_published", False):
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/sfp/config", payload=json.dumps({
+                "name": "Zehnder Corrected SFP",
+                "unique_id": "zehnder_monitor_v2_sfp",
+                "default_entity_id": "sensor.zehnder_corrected_sfp",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.sfp }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'inputs': value_json.inputs, 'calculated_at': value_json.calculated_at} | tojson }}",
+                "unit_of_measurement": "kW/(m³/s)",
+                "state_class": "measurement",
+                "suggested_display_precision": 3,
+                "icon": "mdi:speedometer",
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            self.v2_discovery_published = True
+        payload = corrected_sfp(inputs, datetime.now(timezone.utc).isoformat())
+        payload["sfp"] = round(payload["sfp"], 4)
+        self.call_service("mqtt/publish", topic="zehnder/monitor/v2/state", payload=json.dumps(payload), retain=False)
+
     def _publish_mqtt_discovery(self):
         device = {
             "identifiers": ["zehnder_monitor"],
@@ -1185,6 +1224,11 @@ class ZehnderMonitor(hass.Hass):
 
     def _tick(self, kwargs):
         self.tick_count += 1
+        self.log(f"Evaluation tick {self.tick_count}")
+        try:
+            self._publish_corrected_sfp()
+        except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+            self.log(f"Corrected SFP unavailable: {exc}", level="WARNING")
         r = self._read()
         if r is None:
             if self.tick_count % 10 == 0:

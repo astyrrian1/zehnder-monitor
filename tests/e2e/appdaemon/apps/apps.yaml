@@ -1,0 +1,3 @@
+zehnder_monitor:
+  module: zehnder_monitor
+  class: ZehnderMonitor
