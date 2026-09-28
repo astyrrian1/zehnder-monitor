@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import time
 import urllib.request
 
 
@@ -38,7 +39,7 @@ def main():
     token = os.environ["ZMON_TEST_HA_TOKEN"]
 
     def put(entity_id, value, unit=None):
-        body = {"state": str(value), "attributes": {}}
+        body = {"state": str(value), "attributes": {"test_report_id": time.time_ns()}}
         if unit:
             body["attributes"]["unit_of_measurement"] = unit
         request = urllib.request.Request(

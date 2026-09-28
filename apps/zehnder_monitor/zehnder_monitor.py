@@ -24,12 +24,13 @@ import os
 import statistics
 import time
 import importlib.util
+import math
 from datetime import datetime, timezone
 
 try:
-    from corrected import corrected_sfp
+    from corrected import evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility
 except ImportError:
-    from .corrected import corrected_sfp
+    from .corrected import evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility
 
 try:
     from capability import (
@@ -154,6 +155,9 @@ class ZehnderMonitor(hass.Hass):
         self.tick_count = 0
         self.discovery_published = False
         self.v2_discovery_published = False
+        self.v2_last_fingerprint = None
+        self.v2_accepted_reports = 0
+        self.v2_recent_samples = []
 
         loaded_baselines = self._load_json(self.BASELINE_FILE, self._defaults())
         self.baselines = self._migrate_baselines(loaded_baselines)
@@ -545,11 +549,11 @@ class ZehnderMonitor(hass.Hass):
         # RPM per unit flow -- direct impeller resistance proxy
         self.supply_rpm_per_flow = (
             r["supply_rpm"] / r["supply_flow"]
-            if r["supply_flow"] and r["supply_flow"] > 10 else 0.0
+            if r["supply_rpm"] is not None and r["supply_flow"] and r["supply_flow"] > 10 else 0.0
         )
         self.exhaust_rpm_per_flow = (
             r["exhaust_rpm"] / r["exhaust_flow"]
-            if r["exhaust_flow"] and r["exhaust_flow"] > 10 else 0.0
+            if r["exhaust_rpm"] is not None and r["exhaust_flow"] and r["exhaust_flow"] > 10 else 0.0
         )
 
         # Heat recovery is only meaningful from fresh, synchronous temperatures.
@@ -939,14 +943,30 @@ class ZehnderMonitor(hass.Hass):
     def _publish_corrected_sfp(self):
         """Publish a separate SFP reading with its exact source measurements."""
         inputs = {}
-        for key in ("power", "supply_flow", "exhaust_flow"):
+        for key in (
+            "power", "supply_flow", "exhaust_flow", "supply_duty", "exhaust_duty",
+            "supply_rpm", "exhaust_rpm", "bypass", "supply_temp", "outdoor_temp",
+            "extract_temp", "fan_level",
+        ):
             source = self.get_state(self.E[key], attribute="all")
             if not isinstance(source, dict):
-                return
+                inputs[key] = None
+                continue
+            raw_value = source.get("state")
+            try:
+                numeric = float(raw_value)
+                value = numeric if math.isfinite(numeric) else str(raw_value)
+            except (TypeError, ValueError):
+                value = raw_value
+            attributes = source.get("attributes") or {}
             inputs[key] = {
-                "value": float(source["state"]),
-                "unit": source.get("attributes", {}).get("unit_of_measurement"),
-                "reported_at": source.get("last_updated"),
+                "value": value,
+                "unit": attributes.get("unit_of_measurement"),
+                "reported_at": (
+                    attributes["source_reported_at"]
+                    if "source_reported_at" in attributes
+                    else source.get("last_reported") or source.get("last_updated")
+                ),
             }
         if not getattr(self, "v2_discovery_published", False):
             self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/sfp/config", payload=json.dumps({
@@ -961,12 +981,50 @@ class ZehnderMonitor(hass.Hass):
                 "state_class": "measurement",
                 "suggested_display_precision": 3,
                 "icon": "mdi:speedometer",
+                "availability_topic": "zehnder/monitor/v2/state",
+                "availability_template": "{{ 'online' if value_json.quality == 'current' else 'offline' }}",
+                "expire_after": 180,
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/quality/config", payload=json.dumps({
+                "name": "Zehnder Corrected SFP Quality",
+                "unique_id": "zehnder_monitor_v2_sfp_quality",
+                "default_entity_id": "sensor.zehnder_corrected_sfp_quality",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.quality }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'calculated_at': value_json.calculated_at, 'reason': value_json.reason, 'fan_effort_quality': value_json.fan_effort_quality, 'fan_effort_reason': value_json.fan_effort_reason, 'recovery_quality': value_json.recovery_quality, 'recovery_reason': value_json.recovery_reason, 'baseline_eligible': value_json.baseline_eligible, 'eligibility_reason': value_json.eligibility_reason, 'accepted_reports': value_json.accepted_reports} | tojson }}",
+                "expire_after": 180,
+                "icon": "mdi:check-decagram",
                 "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
             }), retain=True)
             self.v2_discovery_published = True
-        payload = corrected_sfp(inputs, datetime.now(timezone.utc).isoformat())
-        payload["sfp"] = round(payload["sfp"], 4)
-        self.call_service("mqtt/publish", topic="zehnder/monitor/v2/state", payload=json.dumps(payload), retain=False)
+        result = evaluate_sfp(inputs, datetime.now(timezone.utc).isoformat())
+        fan_effort = evaluate_fan_effort(inputs, result["calculated_at"])
+        recovery = evaluate_recovery_inputs(inputs, result["calculated_at"])
+        eligible, eligibility_reason, recent = evaluate_sampling_eligibility(
+            inputs, result, getattr(self, "v2_recent_samples", []), result["calculated_at"]
+        )
+        self.v2_recent_samples = recent if eligibility_reason in ("warming_up", "stable_conditions", "unstable") else []
+        if result["quality"] == "current" and result["fingerprint"] != getattr(self, "v2_last_fingerprint", None):
+            self.v2_accepted_reports = getattr(self, "v2_accepted_reports", 0) + 1
+            self.v2_last_fingerprint = result["fingerprint"]
+        payload = {
+            "sfp": round(result["sfp"], 4) if result["sfp"] is not None else None,
+            "inputs": inputs,
+            "calculated_at": result["calculated_at"],
+            "quality": result["quality"],
+            "reason": result["reason"],
+            "fan_effort_quality": fan_effort["quality"],
+            "fan_effort_reason": fan_effort["reason"],
+            "recovery_quality": recovery["quality"],
+            "recovery_reason": recovery["reason"],
+            "baseline_eligible": eligible,
+            "eligibility_reason": eligibility_reason,
+            "accepted_reports": getattr(self, "v2_accepted_reports", 0),
+        }
+        self.call_service("mqtt/publish", topic="zehnder/monitor/v2/state", payload=json.dumps(payload, allow_nan=False), retain=False)
+        return result["quality"]
 
     def _publish_mqtt_discovery(self):
         device = {
@@ -1222,26 +1280,49 @@ class ZehnderMonitor(hass.Hass):
     # MASTER TICK
     # =================================================================
 
+    def _prune_history(self):
+        now = time.time()
+        cutoff = now - self.BUFFER_HOURS * 3600
+        for name in ("sfp_buffer", "ratio_buffer", "rpm_ratio_buffer", "heat_recovery_buffer"):
+            if hasattr(self, name):
+                setattr(self, name, [(t, value) for t, value in getattr(self, name) if t > cutoff])
+        if hasattr(self, "baseline_candidate_buffer"):
+            baseline_cutoff = now - self.BASELINE_CANDIDATE_HOURS * 3600
+            self.baseline_candidate_buffer = [
+                sample for sample in self.baseline_candidate_buffer
+                if sample.get("time", 0) > baseline_cutoff
+            ]
+
     def _tick(self, kwargs):
         self.tick_count += 1
         self.log(f"Evaluation tick {self.tick_count}")
+        self._prune_history()
         try:
-            self._publish_corrected_sfp()
-        except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
-            self.log(f"Corrected SFP unavailable: {exc}", level="WARNING")
+            v2_quality = self._publish_corrected_sfp()
+        except Exception as exc:
+            self.log(f"Corrected SFP publisher failed: {exc}", level="ERROR")
+            return
+        if v2_quality != "current":
+            return
         r = self._read()
         if r is None:
             if self.tick_count % 10 == 0:
                 self.log("Unit offline.", level="WARNING")
             return
+        if r.get("supply_rpm") is None or r.get("exhaust_rpm") is None:
+            return
 
-        self._compute(r)
-        self._sample(r)
-        self._detect_change(r)
-        self._health(r)
-        if not self.discovery_published:
-            self.discovery_published = self._publish_mqtt_discovery()
-        self._publish_mqtt(r)
+        try:
+            self._compute(r)
+            self._sample(r)
+            self._detect_change(r)
+            self._health(r)
+            if not self.discovery_published:
+                self.discovery_published = self._publish_mqtt_discovery()
+            self._publish_mqtt(r)
+        except Exception as exc:
+            self.log(f"Legacy monitor evaluation failed: {exc}", level="ERROR")
+            return
 
         if self.tick_count % 5 == 0:
             self._persist()

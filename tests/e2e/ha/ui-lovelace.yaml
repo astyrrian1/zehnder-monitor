@@ -24,6 +24,27 @@ views:
           Supply: {{ attrs.supply_flow.value }} {{ attrs.supply_flow.unit }} (reported {{ attrs.supply_flow.reported_at }}).
           Exhaust: {{ attrs.exhaust_flow.value }} {{ attrs.exhaust_flow.unit }} (reported {{ attrs.exhaust_flow.reported_at }}).
           {% else %}Awaiting corrected SFP.{% endif %}
+      - type: markdown
+        title: Reading quality
+        content: >-
+          {% set q = states('sensor.zehnder_corrected_sfp_quality') %}
+          {% set reason = state_attr('sensor.zehnder_corrected_sfp_quality', 'reason') %}
+          {% if q == 'current' %}Current measurement from reported source values.
+          {% elif q == 'stopped' %}Fans stopped or airflow is zero; SFP is unavailable.
+          {% elif q == 'stale' %}Source reporting is older than 10 minutes; SFP is unavailable.
+          {% elif q == 'unknown_freshness' %}Source report time is unknown; SFP is unavailable.
+          {% elif q == 'unsupported' %}Source units are unsupported; SFP is unavailable.
+          {% elif q == 'invalid' %}Source values are invalid; SFP is unavailable.
+          {% elif q == 'unavailable' %}Required source values are unavailable.
+          {% else %}Monitor publication is unavailable or has expired.
+          {% endif %}
+          {% if reason %}Reason: {{ reason }}.{% endif %}
+          Fan-effort inputs: {{ state_attr('sensor.zehnder_corrected_sfp_quality', 'fan_effort_quality') or 'unknown' }}
+          ({{ state_attr('sensor.zehnder_corrected_sfp_quality', 'fan_effort_reason') or 'no reason' }}).
+          Recovery inputs: {{ state_attr('sensor.zehnder_corrected_sfp_quality', 'recovery_quality') or 'unknown' }}
+          ({{ state_attr('sensor.zehnder_corrected_sfp_quality', 'recovery_reason') or 'no reason' }}).
+          Baseline sampling: {% if state_attr('sensor.zehnder_corrected_sfp_quality', 'baseline_eligible') %}eligible{% else %}ineligible{% endif %}
+          ({{ state_attr('sensor.zehnder_corrected_sfp_quality', 'eligibility_reason') or 'not assessed' }}).
       - type: entities
         title: Legacy readings (historical method)
         entities:

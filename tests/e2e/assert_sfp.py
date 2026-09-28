@@ -1,6 +1,7 @@
 """Assert the isolated HA entity reflects the exact v2 SFP inputs."""
 
 import argparse
+from datetime import datetime
 import json
 import math
 import os
@@ -13,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("power", type=float)
     parser.add_argument("--timeout", type=float, default=65)
+    parser.add_argument("--after", help="Require a calculation after this ISO timestamp")
     args = parser.parse_args()
     base = os.environ["ZMON_TEST_HA_URL"].rstrip("/")
     if not base.endswith(":18123"):
@@ -35,7 +37,11 @@ def main():
         if last and last["state"] not in ("unknown", "unavailable"):
             attributes = last["attributes"]
             inputs = attributes.get("inputs", {})
-            if math.isclose(float(last["state"]), expected, abs_tol=0.00005) and inputs.get("power", {}).get("value") == args.power:
+            fresh_calculation = (
+                not args.after
+                or (attributes.get("calculated_at") and datetime.fromisoformat(attributes["calculated_at"]) > datetime.fromisoformat(args.after))
+            )
+            if fresh_calculation and math.isclose(float(last["state"]), expected, abs_tol=0.00005) and inputs.get("power", {}).get("value") == args.power:
                 assert inputs["power"]["unit"] == "W"
                 for key in ("supply_flow", "exhaust_flow"):
                     assert inputs[key]["value"] == 350

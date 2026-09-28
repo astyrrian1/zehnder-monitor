@@ -26,3 +26,12 @@ ventilation commands; its state message is non-retained.
 The first newly discovered HA entity can remain `unknown` until the second
 60-second publication because discovery and state are separate MQTT messages.
 The 65-second input-to-display target applies after discovery is established.
+
+For milestone 2, keep the test account's OAuth token JSON outside this repo,
+then set `ZMON_TEST_TOKEN_FILE=<absolute test-token JSON path>` and
+`ZMON_TEST_STACK_SSH=<test Docker host>` alongside `ZMON_TEST_HA_URL`.
+Run `python3 -u run_m2.py`. The script refreshes the test token, updates only
+the isolated AppDaemon secret, and exercises invalid inputs, expiry, HA restart,
+and recovery. It takes roughly 15 minutes at the fixed 60-second cadence.
+REST-created simulated entities should be seeded before AppDaemon starts after
+an HA restart, so its initial snapshot includes them.
