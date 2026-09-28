@@ -59,9 +59,43 @@ views:
           supply and exhaust filter paths have clean filters after maintenance
           to begin learning. Absolute SFP remains available; no corrected
           comparison or replacement estimate is available yet.
-          {% elif state in ['settling', 'learning', 'partial', 'qualified'] %}
-          Calibration: **{{ state }}**.
+          {% elif state == 'settling' %}
+          **Settling after confirmed maintenance.** Both filter paths were
+          confirmed clean at {{ state_attr('sensor.zehnder_corrected_calibration', 'confirmed_at') }}.
+          Learning begins at {{ state_attr('sensor.zehnder_corrected_calibration', 'settling_until') }}.
+          {% elif state == 'learning' %}
+          **Learning clean-filter references.** Candidate counts:
+          {{ state_attr('sensor.zehnder_corrected_calibration', 'candidate_counts') }}.
+          Collection closes at {{ state_attr('sensor.zehnder_corrected_calibration', 'learning_until') }}.
+          {% elif state == 'qualified' %}
+          **Clean-filter reference qualified.** Captured from confirmed
+          maintenance cycle {{ state_attr('sensor.zehnder_corrected_calibration', 'cycle_id') }}.
+          {% elif state == 'partial' %}
+          **Learning closed with partial coverage.** Unvisited operating points
+          and unqualified metrics remain unavailable.
           {% else %}Calibration state unavailable.{% endif %}
+          {% if state_attr('sensor.zehnder_corrected_calibration', 'timer_confirmation_requested') %}
+          The maintenance timer increased. Confirm both filter paths are clean
+          only after checking them; the timer alone does not establish a new reference.
+          {% endif %}
+      - type: markdown
+        title: Reference capture details
+        content: >-
+          Cycle: {{ state_attr('sensor.zehnder_corrected_calibration', 'cycle_id') or 'none' }}.
+          Confirmed: {{ state_attr('sensor.zehnder_corrected_calibration', 'confirmed_at') or 'not yet' }}.
+          Candidate counts: {{ state_attr('sensor.zehnder_corrected_calibration', 'candidate_counts') or {} }}.
+          Qualified references: {{ state_attr('sensor.zehnder_corrected_calibration', 'references') or {} }}.
+      - type: button
+        name: Confirm both filter paths are clean
+        icon: mdi:air-filter
+        entity: input_button.zehnder_confirm_clean_filters
+        tap_action:
+          action: perform-action
+          perform_action: input_button.press
+          target:
+            entity_id: input_button.zehnder_confirm_clean_filters
+          confirmation:
+            text: Confirm both supply and exhaust filter paths have clean filters after maintenance.
       - type: entities
         title: Reference provenance
         entities:

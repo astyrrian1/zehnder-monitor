@@ -2,3 +2,8 @@ zehnder_monitor:
   module: zehnder_monitor
   class: ZehnderMonitor
   data_dir: /conf/zehnder-monitor
+  isolated_test_mode: true
+  test_tick_seconds: 2
+  test_settling_seconds: 6
+  test_learning_seconds: 120
+  test_min_span_seconds: 32

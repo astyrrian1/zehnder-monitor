@@ -43,3 +43,15 @@ and a legacy May-baseline upgrade. The corrected reference stays empty in both.
 Run `python3 -u assert_pending_quiet.py --seconds 601` to hold that state
 through the ten-minute fault-notification delay while renewing simulated
 source reports. These scripts never confirm maintenance or issue fan commands.
+
+For milestone 4, run `python3 -u run_m4.py` with the same isolated URL,
+`ZMON_TEST_TOKEN_FILE`, and `ZMON_TEST_STACK_SSH` as milestone 2. It copies the
+current publisher only into the named test stack, uses test-only 2-second ticks,
+6-second settling, 120-second learning, and 32-second minimum span. Production
+defaults remain 60 seconds, two hours, 72 hours, and 30 minutes. The script
+resets only `corrected_v2.json` in the isolated volume, confirms simulated
+maintenance, checks duplicate delivery and restart, qualifies SFP/duty/RPM,
+freezes references, repeats without RPM for partial qualification, and checks
+corrupt-file recovery plus timer-only confirmation prompting. Open the isolated
+HA dashboard to inspect the confirmation dialog and rendered progress. It
+never sends fan, bypass, or timer-control commands.

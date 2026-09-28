@@ -6,3 +6,6 @@ lovelace:
   mode: yaml
 http:
   server_port: 8123
+input_button:
+  zehnder_confirm_clean_filters:
+    name: Confirm both Zehnder filter paths clean
