@@ -71,3 +71,10 @@ timestamps to replay UTC hourly observations through AppDaemon and MQTT. It
 checks positive, negative, flat, sparse, and new-cycle cases. `--reuse-reference`
 is an accelerated development option when the isolated stack already has a
 qualified test reference. Production never reads the test clock entity.
+
+For milestone 7, run `python3 -u run_m7.py` with the same isolated URL,
+`ZMON_TEST_TOKEN_FILE`, and `ZMON_TEST_STACK_SSH`. It refreshes the test token,
+restarts only the isolated stack, and feeds heating, Fahrenheit, cooling, small
+Delta-T, bypass, stale-temperature, and anomalous-ratio source states. The
+30-second conditioned recovery window is test-only; production uses 15 minutes.
+The dashboard distinguishes current raw recovery from historical median.

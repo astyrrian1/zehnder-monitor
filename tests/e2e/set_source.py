@@ -17,6 +17,9 @@ SUFFIXES = {
     "exhaust_duty": "exhaust_fan_duty",
     "bypass": "bypass_state",
     "filter_days": "filter_replacement_remaining_days",
+    "supply_temp": "supply_air_temperature",
+    "outdoor_temp": "outdoor_air_temperature",
+    "extract_temp": "extract_air_temperature",
 }
 
 

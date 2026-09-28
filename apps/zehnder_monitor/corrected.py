@@ -152,20 +152,59 @@ def evaluate_fan_effort(inputs, calculated_at):
 
 
 def evaluate_recovery_inputs(inputs, calculated_at):
-    """Screen recovery operating evidence; calculation is added in milestone 7."""
+    """Apparent sensible recovery, never clipped or called certified efficiency."""
     now = datetime.fromisoformat(calculated_at)
+    result = {"quality": "unavailable", "reason": None,
+              "apparent_sensible_recovery_pct": None, "temperatures_c": None}
     bypass = inputs.get("bypass")
     if not isinstance(bypass, dict) or bypass.get("value") in (None, "", "unknown", "unavailable"):
-        return {"quality": "unsupported", "reason": "unknown_bypass"}
+        result.update(quality="unsupported", reason="unknown_bypass")
+        return result
     values = {}
-    for key in ("bypass", "supply_temp", "outdoor_temp", "extract_temp"):
+    for key in ("bypass", "supply_temp", "outdoor_temp", "extract_temp", "supply_flow", "exhaust_flow"):
         value, quality, reason = _validate_dynamic(inputs, key, now)
         if quality != "current":
-            return {"quality": quality, "reason": reason}
+            result.update(quality=quality, reason=reason)
+            return result
+        if key.endswith("_temp") and inputs[key]["unit"] in ("°F", "F"):
+            value = (value - 32) * 5 / 9
         values[key] = value
     if values["bypass"] >= 5:
-        return {"quality": "unsupported", "reason": "bypass_open"}
-    return {"quality": "current", "reason": "fresh_reports"}
+        result.update(quality="unsupported", reason="bypass_open")
+        return result
+    if values["supply_flow"] <= 0 or values["exhaust_flow"] <= 0:
+        result.update(quality="stopped", reason="zero_airflow")
+        return result
+    mode = inputs.get("fan_level")
+    if not isinstance(mode, dict) or mode.get("value") not in ("Low", "Medium"):
+        result.update(quality="unsupported", reason="unsupported_fan_level")
+        return result
+    temperatures = {key: values[key] for key in ("supply_temp", "outdoor_temp", "extract_temp")}
+    result["temperatures_c"] = temperatures
+    delta = values["extract_temp"] - values["outdoor_temp"]
+    if abs(delta) < 5:
+        result.update(quality="unsupported", reason="small_temperature_difference")
+        return result
+    ratio = (values["supply_temp"] - values["outdoor_temp"]) / delta * 100
+    result["apparent_sensible_recovery_pct"] = ratio
+    if ratio < 0 or ratio > 100:
+        result.update(quality="anomalous", reason="out_of_range_apparent_ratio")
+    else:
+        result.update(quality="current", reason="fresh_reports")
+    return result
+
+
+def conditioned_recovery(raw_pct, fingerprint, now, history, window_seconds=900, reported_at=None):
+    """Historical median stays labeled as history when current raw is missing."""
+    from datetime import timedelta
+    cutoff = now - timedelta(seconds=window_seconds)
+    history = [item for item in history
+               if cutoff <= datetime.fromisoformat(item['reported_at']) <= now]
+    if raw_pct is not None and fingerprint and not any(item['fingerprint'] == fingerprint for item in history):
+        history.append({'fingerprint': fingerprint, 'reported_at': reported_at or now.isoformat(), 'value': raw_pct})
+    if len(history) < 5:
+        return None, history
+    return statistics.median(item['value'] for item in history), history
 
 
 def evaluate_sampling_eligibility(inputs, sfp_result, recent, calculated_at):

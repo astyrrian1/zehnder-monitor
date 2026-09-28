@@ -81,6 +81,7 @@ class QualityTests(unittest.TestCase):
             "supply_temp": {"value": 16, "unit": "°C", "reported_at": stamp},
             "outdoor_temp": {"value": 0, "unit": "°C", "reported_at": stamp},
             "extract_temp": {"value": 20, "unit": "°C", "reported_at": stamp},
+            "fan_level": {"value": "Medium", "unit": None, "reported_at": stamp},
         })
         self.assertEqual(self.calc.evaluate_fan_effort(inputs, NOW)["quality"], "current")
         self.assertEqual(self.calc.evaluate_recovery_inputs(inputs, NOW)["quality"], "current")

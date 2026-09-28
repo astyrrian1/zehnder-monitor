@@ -40,6 +40,11 @@ def main():
     parser.add_argument("--supply-rpm", type=float, default=1250)
     parser.add_argument("--exhaust-rpm", type=float, default=1250)
     parser.add_argument("--reported-at", help="test-only source report time for virtual-clock replay")
+    parser.add_argument("--supply-temp", type=float, default=16)
+    parser.add_argument("--outdoor-temp", type=float, default=0)
+    parser.add_argument("--extract-temp", type=float, default=20)
+    parser.add_argument("--temp-unit", choices=("°C", "°F"), default="°C")
+    parser.add_argument("--bypass", type=float, default=0)
     args = parser.parse_args()
     base = os.environ["ZMON_TEST_HA_URL"].rstrip("/")
     if not base.endswith(":18123"):
@@ -72,9 +77,15 @@ def main():
         'supply_fan_speed': args.supply_rpm,
         'exhaust_fan_speed': args.exhaust_rpm,
         'fan_level': args.fan_level,
+        'supply_air_temperature': args.supply_temp,
+        'outdoor_air_temperature': args.outdoor_temp,
+        'extract_air_temperature': args.extract_temp,
+        'bypass_state': args.bypass,
     }
     for suffix, (default, unit) in MEASUREMENTS.items():
         value = overrides.get(suffix, default)
+        if suffix in ('supply_air_temperature', 'outdoor_air_temperature', 'extract_air_temperature'):
+            unit = args.temp_unit
         put(PREFIX + suffix, value, unit)
     print("Seeded isolated HA source entities, power", args.power)
 

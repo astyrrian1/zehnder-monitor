@@ -25,12 +25,13 @@ import statistics
 import time
 import importlib.util
 import math
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 try:
-    from corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend
+    from corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend, conditioned_recovery
 except ImportError:
-    from .corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend
+    from .corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend, conditioned_recovery
 
 try:
     from capability import (
@@ -162,6 +163,7 @@ class ZehnderMonitor(hass.Hass):
         self.v2_accepted_reports = 0
         self.v2_recent_samples = []
         self.v2_comparison_samples = []
+        self.v2_recovery_samples = []
 
         loaded_baselines = self._load_json(self.BASELINE_FILE, self._defaults())
         self.baselines = self._migrate_baselines(loaded_baselines)
@@ -1309,6 +1311,33 @@ class ZehnderMonitor(hass.Hass):
                 "expire_after": 180,
                 "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
             }), retain=True)
+            for key, title, template, availability in (
+                ("recovery_raw", "Apparent Sensible Recovery", "{{ value_json.recovery.raw_pct }}",
+                 "{{ 'online' if value_json.recovery.raw_pct is not none else 'offline' }}"),
+                ("recovery_conditioned", "Conditioned Apparent Recovery", "{{ value_json.recovery.conditioned_pct }}",
+                 "{{ 'online' if value_json.recovery.conditioned_pct is not none else 'offline' }}"),
+            ):
+                self.call_service("mqtt/publish", topic=f"homeassistant/sensor/zehnder_monitor_v2/{key}/config", payload=json.dumps({
+                    "name": "Zehnder Corrected " + title,
+                    "unique_id": "zehnder_monitor_v2_" + key,
+                    "default_entity_id": "sensor.zehnder_corrected_" + key,
+                    "state_topic": "zehnder/monitor/v2/state", "value_template": template,
+                    "availability_topic": "zehnder/monitor/v2/state", "availability_template": availability,
+                    "json_attributes_topic": "zehnder/monitor/v2/state",
+                    "json_attributes_template": "{{ {'quality': value_json.recovery.quality, 'reason': value_json.recovery.reason, 'conditioned_state': value_json.recovery.conditioned_state, 'conditioned_count': value_json.recovery.conditioned_count, 'last_reported_at': value_json.recovery.last_reported_at, 'age_seconds': value_json.recovery.age_seconds, 'window_seconds': value_json.recovery.window_seconds, 'temperatures_c': value_json.recovery.temperatures_c} | tojson }}",
+                    "unit_of_measurement": "%", "state_class": "measurement", "expire_after": 180,
+                    "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+                }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/recovery_quality/config", payload=json.dumps({
+                "name": "Zehnder Corrected Recovery Quality",
+                "unique_id": "zehnder_monitor_v2_recovery_quality",
+                "default_entity_id": "sensor.zehnder_corrected_recovery_quality",
+                "state_topic": "zehnder/monitor/v2/state", "value_template": "{{ value_json.recovery.quality }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'reason': value_json.recovery.reason, 'conditioned_state': value_json.recovery.conditioned_state, 'conditioned_count': value_json.recovery.conditioned_count, 'last_reported_at': value_json.recovery.last_reported_at, 'age_seconds': value_json.recovery.age_seconds, 'window_seconds': value_json.recovery.window_seconds, 'temperatures_c': value_json.recovery.temperatures_c} | tojson }}",
+                "expire_after": 180,
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
             self.v2_discovery_published = True
         result = evaluate_sfp(inputs, self._corrected_now().isoformat())
         if hasattr(self, "v2_state"):
@@ -1408,6 +1437,31 @@ class ZehnderMonitor(hass.Hass):
             point: len(samples) for point, samples in calibration.get("candidates", {}).items()
         }
         visible_calibration["timer_confirmation_requested"] = self.v2_state.get("timer_confirmation_requested", False) if hasattr(self, "v2_state") else False
+        recovery_keys = ("supply_temp", "outdoor_temp", "extract_temp", "bypass", "supply_flow", "exhaust_flow")
+        recovery_fingerprint = hashlib.sha256(json.dumps(
+            {key: inputs.get(key) for key in recovery_keys}, sort_keys=True
+        ).encode()).hexdigest()
+        current_recovery = recovery["apparent_sensible_recovery_pct"] if recovery["quality"] == "current" else None
+        now = datetime.fromisoformat(result["calculated_at"])
+        source_reported = max(inputs[key]["reported_at"] for key in recovery_keys) if current_recovery is not None else None
+        conditioned, self.v2_recovery_samples = conditioned_recovery(
+            current_recovery, recovery_fingerprint if current_recovery is not None else None,
+            now, getattr(self, "v2_recovery_samples", []),
+            int(self.args.get("test_recovery_window_seconds", 900)) if getattr(self, "args", {}).get("isolated_test_mode") else 900,
+            source_reported,
+        )
+        last_reported = self.v2_recovery_samples[-1]["reported_at"] if self.v2_recovery_samples else None
+        recovery_detail = {
+            "raw_pct": round(recovery["apparent_sensible_recovery_pct"], 1) if recovery["apparent_sensible_recovery_pct"] is not None else None,
+            "quality": recovery["quality"], "reason": recovery["reason"],
+            "temperatures_c": recovery["temperatures_c"],
+            "conditioned_pct": round(conditioned, 1) if conditioned is not None else None,
+            "conditioned_state": "historical" if conditioned is not None and current_recovery is None else ("ready" if conditioned is not None else "warming_up"),
+            "conditioned_count": len(self.v2_recovery_samples),
+            "last_reported_at": last_reported,
+            "age_seconds": round((now - datetime.fromisoformat(last_reported)).total_seconds(), 1) if last_reported else None,
+            "window_seconds": 900,
+        }
         payload = {
             "sfp": round(result["sfp"], 4) if result["sfp"] is not None else None,
             "inputs": inputs,
@@ -1424,6 +1478,7 @@ class ZehnderMonitor(hass.Hass):
             "calibration": visible_calibration,
             "comparison": comparison,
             "trend": trend,
+            "recovery": recovery_detail,
         }
         self.call_service("mqtt/publish", topic="zehnder/monitor/v2/state", payload=json.dumps(payload, allow_nan=False), retain=False)
         return result["quality"]
