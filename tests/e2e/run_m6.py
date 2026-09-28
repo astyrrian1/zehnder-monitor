@@ -51,11 +51,30 @@ def main():
         with urllib.request.urlopen(req) as response:
             assert response.status in (200, 201)
 
+    accepted = [0]
+
     def report(timestamp, power):
+        before = accepted[0]
+        fresh_after = datetime.now(timezone.utc)
         set_clock(timestamp)
         subprocess.run([sys.executable, str(HERE / 'seed.py'), str(power), '--reported-at', timestamp.isoformat()],
                        env=env, check=True, stdout=subprocess.DEVNULL)
-        time.sleep(2.25)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            observed = state('sfp_quality')
+            count = int(observed['attributes'].get('accepted_reports', 0))
+            snapshot = state('sfp')
+            inputs = snapshot['attributes'].get('inputs') or {}
+            reports_match = all((inputs.get(key) or {}).get('reported_at') == timestamp.isoformat()
+                                for key in ('power', 'supply_flow', 'exhaust_flow'))
+            reported_at = observed.get('last_reported') or observed.get('last_updated')
+            fresh = reported_at and datetime.fromisoformat(reported_at) >= fresh_after
+            if (count > before and fresh and reports_match
+                    and observed['attributes'].get('calculated_at') == timestamp.isoformat()):
+                accepted[0] = count
+                return
+            time.sleep(.25)
+        raise AssertionError(f'Virtual source report at {timestamp.isoformat()} was not accepted')
 
     def reset_trend():
         # Test-only fixture reset preserves the learned reference and its cycle.
@@ -67,6 +86,7 @@ def main():
         # REST-created clock must exist before AppDaemon takes its snapshot.
         set_clock(datetime.now(timezone.utc))
         subprocess.run(['ssh', host, f'cd {STACK} && docker compose --profile publisher start appdaemon'], check=True)
+        accepted[0] = 0
 
     def replay(slope, hours):
         reset_trend()

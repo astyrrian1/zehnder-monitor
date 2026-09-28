@@ -124,7 +124,7 @@ class ZehnderMonitor(hass.Hass):
         self.log("=" * 60)
         if self.args.get("isolated_test_mode"):
             self.TICK_SECONDS = int(self.args.get("test_tick_seconds", self.TICK_SECONDS))
-        self.log("ZEHNDER MONITOR v1.9.1 -- Physics-Based Filter Health")
+        self.log("ZEHNDER MONITOR v2 -- Corrected Readings and Legacy Compatibility")
         self.log("=" * 60)
 
         self.sfp = 0.0

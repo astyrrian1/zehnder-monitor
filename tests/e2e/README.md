@@ -93,3 +93,14 @@ including the publisher's 180-second expiry. Then run
 test-only notification service, successful retry, and new-incident recovery.
 The temporary missing service is restored by the edge test. Both scripts operate
 only on the named isolated Compose stack and use internal HA notifications.
+
+For the integrated pre-production gate, run `python3 -u run_m10_chain.py` with
+the same isolated environment. It runs all previous journeys sequentially and
+writes a JSON report to `/private/tmp/zehnder-m10-chain.json` by default. Run
+`python3 -u run_m10_rollback.py` for the isolated rollback rehearsal; the next
+chain invocation includes it automatically. After installing the publisher on
+production, use `verify_live_v2.py` for read-only live calculation acceptance,
+`snapshot_legacy.py` before and after rollout to compare recorder history, and
+`observe_v2.py --hours 24 --interval-seconds 60` for passive observation.
+These production readers use `ZMON_OBSERVE_HA_URL` and
+`ZMON_OBSERVE_HA_TOKEN`; they do not write HA state.

@@ -1,5 +1,13 @@
 # Zehnder Monitor
 
+The corrected v2 monitor is documented in [the v2 migration and operation
+guide](docs/migration-v2.md). Legacy entities and history remain available for
+context; their filter-capacity and recovery claims are not corrected-v2 outputs.
+
+The descriptions of automatic baselines, capacity percentages, and alert tiers
+below document the preserved legacy implementation. Use the v2 guide for new
+measurements, calibration, trend, recovery, and notification behavior.
+
 Physics-based filter health monitoring for the **Zehnder ComfoAir Q600** HRV.  
 Runs as a standalone [AppDaemon](https://appdaemon.readthedocs.io/) app for Home Assistant.
 
@@ -62,7 +70,7 @@ Zehnder ComfoAir Q600
 | `sensor.zehnder_baseline_system_resistance` | % | Inferred clean-filter system resistance on the generic SFP envelope |
 | `sensor.zehnder_baseline_quality` | text | Baseline source quality: conditioned, single_sample, fallback, invalid, or learning |
 
-## Alert Tiers
+## Legacy Alert Tiers
 
 AppDaemon outputs raw scores. Alerting is handled by a **blueprint** — a reusable automation template you import once and configure per tier.
 
@@ -116,7 +124,7 @@ AppDaemon outputs raw scores. Alerting is handled by a **blueprint** — a reusa
    - Click **⋮ → Custom repositories**, add `astyrrian1/zehnder-monitor` as **AppDaemon**
    - Search for **Zehnder Monitor** and click **Install**
 
-3. **Import the alert blueprint** (see [Alert Tiers](#alert-tiers) above)
+3. **Import the legacy alert blueprint** (see [Legacy Alert Tiers](#legacy-alert-tiers) above)
 
 4. **Restart AppDaemon** (Settings → Add-ons → AppDaemon → Restart)
 
@@ -154,7 +162,7 @@ Headline SFP, duty ratio, and health score use the median of recent conditioned 
 
 Heat recovery is stricter: it is only published as a trusted metric when the outdoor, supply, and extract temperature readings are fresh and collected during stable operation. If the Zehnder integration has stale temperature states, `sensor.zehnder_heat_recovery` is marked unavailable and `sensor.zehnder_heat_recovery_quality` reports `unavailable`.
 
-## Baseline Management
+## Legacy Baseline Management
 
 Baselines are captured automatically when a filter change is detected (the countdown timer jumps by >90 days). After detection, the system waits 2 hours for stabilisation before recording.
 
@@ -162,7 +170,7 @@ Baselines and rolling trend state persist outside the HACS-managed app directory
 
 When enough stable clean-filter samples are available at a fan level, the monitor stores a conditioned per-fan-level baseline and uses it for capability metrics.
 
-## Baseline-Aware Capacity
+## Legacy Baseline-Aware Capacity
 
 `sensor.zehnder_filter_health` is preserved as the existing absolute/generic performance health score for compatibility with dashboards and alert automations. Within a filter cycle it publishes the worst trusted score seen so far, not the most optimistic recent estimate, so it does not climb because a later conditioned sample happened to look cleaner.
 
@@ -179,7 +187,7 @@ Capacity is clamped to 0-100%. Better-than-baseline readings cap at 100%, so a c
 
 `sensor.zehnder_baseline_system_resistance` expresses the captured clean-filter SFP baseline on the generic SFP health envelope. This is an inferred context metric from fan, power, and flow telemetry; the app does not directly measure duct static pressure.
 
-## Health Score Formula
+## Legacy Health Score Formula
 
 ```
 Health = (SFP_score × 0.50) + (Ratio_score × 0.30) + (Timer_score × 0.20)

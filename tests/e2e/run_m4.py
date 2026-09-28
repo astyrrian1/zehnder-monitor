@@ -66,12 +66,15 @@ def main():
             time.sleep(0.5)
         raise AssertionError('Timed out awaiting isolated state')
 
+    # Stop the writer before removing its file; shutdown can otherwise restore
+    # the prior cycle after the deletion and make chained runs nondeterministic.
+    stack('stop appdaemon')
     # Only this named E2E volume is reset; production and legacy files are untouched.
     subprocess.run(['ssh', host, 'rm', '-f', CORRECTED], check=True)
     seed()
     subprocess.run(['ssh', host, "sh -c 'cat > /opt/stacks/zehnder-monitor-e2e/appdaemon/secrets.yaml'"], input=('ha_token: ' + token + '\n').encode(), check=True)
     started_at = datetime.now(timezone.utc)
-    stack('restart appdaemon')
+    stack('--profile publisher up -d appdaemon')
     until(lambda: (p if (p := persisted()) and p['calibration']['state'] == 'awaiting_confirmation' else None))
     until(lambda: (datetime.fromisoformat(t) > started_at if (t := request('/api/states/sensor.zehnder_corrected_calibration')['attributes'].get('calculated_at')) else False))
     event_id = 'e2e-m4-' + datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
