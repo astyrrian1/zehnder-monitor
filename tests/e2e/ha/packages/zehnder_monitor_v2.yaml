@@ -1,0 +1,128 @@
+# Monitor-only maintenance notice. No ventilation or external notify services.
+input_text:
+  zehnder_monitor_maintenance_notice_key:
+    name: Zehnder maintenance notice key
+    max: 255
+  zehnder_monitor_maintenance_seen_cycle:
+    name: Zehnder maintenance seen cycle
+    max: 255
+  zehnder_monitor_maintenance_suppressed_cycle:
+    name: Zehnder maintenance acknowledged cycle
+    max: 255
+input_boolean:
+  zehnder_monitor_maintenance_notice_live:
+    name: Zehnder maintenance notice active this HA runtime
+    initial: false
+
+automation:
+  - id: zehnder_monitor_maintenance_cycle_reconcile
+    alias: Zehnder Monitor Maintenance Cycle Reconcile
+    mode: queued
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: state
+        entity_id: sensor.zehnder_corrected_calibration
+      - trigger: time_pattern
+        minutes: "/1"
+    conditions: []
+    actions:
+      - variables:
+          cycle: "{{ state_attr('sensor.zehnder_corrected_calibration', 'cycle_id') or 'unconfirmed' }}"
+          seen: "{{ states('input_text.zehnder_monitor_maintenance_seen_cycle') }}"
+          notice_key: "{{ states('input_text.zehnder_monitor_maintenance_notice_key') }}"
+      - if:
+          - condition: template
+            value_template: "{{ cycle != 'unconfirmed' and cycle != seen }}"
+        then:
+          - if:
+              - condition: template
+                value_template: "{{ seen not in ['unknown', 'unavailable', ''] or notice_key not in ['unknown', 'unavailable', ''] }}"
+            then:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.zehnder_monitor_maintenance_suppressed_cycle
+                data:
+                  value: "{{ cycle }}"
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: zehnder_filter_maintenance
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.zehnder_monitor_maintenance_notice_live
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.zehnder_monitor_maintenance_notice_key
+                data:
+                  value: ""
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.zehnder_monitor_maintenance_seen_cycle
+            data:
+              value: "{{ cycle }}"
+
+  - id: zehnder_monitor_maintenance_reminder
+    alias: Zehnder Monitor Maintenance Reminder
+    mode: queued
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: time_pattern
+        minutes: "/1"
+      - trigger: state
+        entity_id: sensor.zehnder_comfoair_q_a4cb9c_filter_replacement_remaining_days
+      - trigger: state
+        entity_id: input_text.zehnder_monitor_maintenance_seen_cycle
+      - trigger: state
+        entity_id: input_text.zehnder_monitor_maintenance_suppressed_cycle
+    conditions: []
+    actions:
+      - variables:
+          raw_days: "{{ states('sensor.zehnder_comfoair_q_a4cb9c_filter_replacement_remaining_days') }}"
+          cycle: "{{ state_attr('sensor.zehnder_corrected_calibration', 'cycle_id') or 'unconfirmed' }}"
+          seen: "{{ states('input_text.zehnder_monitor_maintenance_seen_cycle') }}"
+          suppressed: "{{ states('input_text.zehnder_monitor_maintenance_suppressed_cycle') }}"
+          notice_key: "{{ states('input_text.zehnder_monitor_maintenance_notice_key') }}"
+          severity: >-
+            {{ 'due' if is_number(raw_days) and raw_days | float(999) <= 0
+               else 'soon' if is_number(raw_days) and raw_days | float(999) <= 7
+               else 'clear' if is_number(raw_days) else 'unknown' }}
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ severity == 'clear' and suppressed == cycle }}"
+            sequence:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.zehnder_monitor_maintenance_suppressed_cycle
+                data:
+                  value: ""
+          - conditions:
+              - condition: template
+                value_template: >-
+                  {{ severity in ['soon', 'due']
+                     and (cycle == 'unconfirmed' or cycle == seen)
+                     and suppressed != cycle
+                     and (notice_key != cycle ~ '|' ~ severity
+                          or is_state('input_boolean.zehnder_monitor_maintenance_notice_live', 'off')) }}
+            sequence:
+              - action: persistent_notification.create
+                data:
+                  notification_id: zehnder_filter_maintenance
+                  title: >-
+                    {{ 'Zehnder filter maintenance due now' if severity == 'due'
+                       else 'Zehnder filter maintenance due soon' }}
+                  message: >-
+                    Manufacturer maintenance countdown reports
+                    {{ raw_days }} days remaining. Check both filter paths and
+                    complete maintenance as appropriate. Confirm clean filters
+                    in the monitor after checking them; a timer reset alone
+                    does not confirm replacement.
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.zehnder_monitor_maintenance_notice_key
+                data:
+                  value: "{{ cycle }}|{{ severity }}"
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.zehnder_monitor_maintenance_notice_live

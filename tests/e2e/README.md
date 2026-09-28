@@ -78,3 +78,10 @@ restarts only the isolated stack, and feeds heating, Fahrenheit, cooling, small
 Delta-T, bypass, stale-temperature, and anomalous-ratio source states. The
 30-second conditioned recovery window is test-only; production uses 15 minutes.
 The dashboard distinguishes current raw recovery from historical median.
+
+For milestone 8, run `python3 -u run_m8.py` with the same isolated URL,
+`ZMON_TEST_TOKEN_FILE`, and `ZMON_TEST_STACK_SSH`. It installs the native HA
+maintenance package only into the isolated stack and exercises unknown, seven-day,
+due-now, timer-reset, confirmed-maintenance, later-episode, restart, and
+already-due-at-startup paths. The notification capture uses Home Assistant's
+WebSocket persistent-notification command. The test sends no external message.
