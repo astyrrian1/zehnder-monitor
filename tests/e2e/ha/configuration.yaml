@@ -1,0 +1,12 @@
+default_config:
+homeassistant:
+  name: Zehnder E2E
+  time_zone: UTC
+  packages: !include_dir_named packages
+lovelace:
+  mode: yaml
+http:
+  server_port: 8123
+input_button:
+  zehnder_confirm_clean_filters:
+    name: Confirm both Zehnder filter paths clean

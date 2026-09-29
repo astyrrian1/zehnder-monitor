@@ -1,0 +1,204 @@
+title: Zehnder Test Monitor
+views:
+  - title: Corrected ventilation efficiency
+    path: zehnder
+    cards:
+      - type: entities
+        title: Corrected SFP
+        entities:
+          - entity: sensor.zehnder_corrected_sfp
+            name: Corrected SFP
+      - type: markdown
+        title: Exact inputs used for corrected SFP
+        content: >-
+          {% set attrs = state_attr('sensor.zehnder_corrected_sfp', 'inputs') %}
+          {% if attrs %}
+          Calculated: {{ state_attr('sensor.zehnder_corrected_sfp', 'calculated_at') }}.
+          Power from sensor.zehnder_comfoair_q_a4cb9c_power: {{ attrs.power.value }} {{ attrs.power.unit }} (reported {{ attrs.power.reported_at }}).
+          Supply from sensor.zehnder_comfoair_q_a4cb9c_supply_fan_flow: {{ attrs.supply_flow.value }} {{ attrs.supply_flow.unit }} (reported {{ attrs.supply_flow.reported_at }}).
+          Exhaust from sensor.zehnder_comfoair_q_a4cb9c_exhaust_fan_flow: {{ attrs.exhaust_flow.value }} {{ attrs.exhaust_flow.unit }} (reported {{ attrs.exhaust_flow.reported_at }}).
+          {% else %}Awaiting corrected SFP.{% endif %}
+      - type: markdown
+        title: Reading quality
+        content: >-
+          {% set q = states('sensor.zehnder_corrected_sfp_quality') %}
+          {% set reason = state_attr('sensor.zehnder_corrected_sfp_quality', 'reason') %}
+          {% if q == 'current' %}Current measurement from reported source values.
+          {% elif q == 'stopped' %}Fans stopped or airflow is zero; SFP is unavailable.
+          {% elif q == 'stale' %}Source reporting is older than 10 minutes; SFP is unavailable.
+          {% elif q == 'unknown_freshness' %}Source report time is unknown; SFP is unavailable.
+          {% elif q == 'unsupported' %}Source units are unsupported; SFP is unavailable.
+          {% elif q == 'invalid' %}Source values are invalid; SFP is unavailable.
+          {% elif q == 'unavailable' %}Required source values are unavailable.
+          {% else %}Monitor publication is unavailable or has expired.
+          {% endif %}
+          {% if reason %}Reason: {{ reason }}.{% endif %}
+          Fan-effort inputs: {{ state_attr('sensor.zehnder_corrected_sfp_quality', 'fan_effort_quality') or 'unknown' }}
+          ({{ state_attr('sensor.zehnder_corrected_sfp_quality', 'fan_effort_reason') or 'no reason' }}).
+          Recovery inputs: {{ state_attr('sensor.zehnder_corrected_sfp_quality', 'recovery_quality') or 'unknown' }}
+          ({{ state_attr('sensor.zehnder_corrected_sfp_quality', 'recovery_reason') or 'no reason' }}).
+          Baseline sampling: {% if state_attr('sensor.zehnder_corrected_sfp_quality', 'baseline_eligible') %}eligible{% else %}ineligible{% endif %}
+          ({{ state_attr('sensor.zehnder_corrected_sfp_quality', 'eligibility_reason') or 'not assessed' }}).
+      - type: entities
+        title: Legacy readings (historical method)
+        entities:
+          - entity: sensor.zehnder_sfp
+            name: Legacy SFP
+      - type: markdown
+        title: Monitor reporting
+        content: >-
+          {% set incident = states('input_text.zehnder_monitor_fault_incident') %}
+          {% if incident not in ['unknown', 'unavailable', ''] %}
+          **Reporting interruption under observation.** First observed:
+          {{ states('input_datetime.zehnder_monitor_fault_first_observed') }}.
+          {% if is_state('input_boolean.zehnder_monitor_fault_delivered', 'on') %}
+          A persistent monitor-reporting notice is active.
+          {% else %}A notice is sent only if the interruption persists for ten minutes.{% endif %}
+          {% else %}No persistent monitor-reporting incident is active.
+          {% set resolved = states('input_datetime.zehnder_monitor_fault_last_resolved') %}
+          {% if resolved not in ['unknown', 'unavailable', ''] %}Last recovery confirmed: {{ resolved }}.{% endif %}
+          {% endif %}
+          This status describes the monitor's data path, not a mechanical diagnosis.
+      - type: markdown
+        title: Clean-filter reference
+        content: >-
+          {% set state = states('sensor.zehnder_corrected_calibration') %}
+          {% if state == 'awaiting_confirmation' %}
+          **Awaiting confirmed clean-filter reference.** Confirm that both
+          supply and exhaust filter paths have clean filters after maintenance
+          to begin learning. Absolute SFP remains available; no corrected
+          comparison or replacement estimate is available yet.
+          {% elif state == 'settling' %}
+          **Settling after confirmed maintenance.** Both filter paths were
+          confirmed clean at {{ state_attr('sensor.zehnder_corrected_calibration', 'confirmed_at') }}.
+          Learning begins at {{ state_attr('sensor.zehnder_corrected_calibration', 'settling_until') }}.
+          {% elif state == 'learning' %}
+          **Learning clean-filter references.** Candidate counts:
+          {{ state_attr('sensor.zehnder_corrected_calibration', 'candidate_counts') }}.
+          Collection closes at {{ state_attr('sensor.zehnder_corrected_calibration', 'learning_until') }}.
+          {% elif state == 'qualified' %}
+          **Clean-filter reference qualified.** Captured from confirmed
+          maintenance cycle {{ state_attr('sensor.zehnder_corrected_calibration', 'cycle_id') }}.
+          {% elif state == 'partial' %}
+          **Learning closed with partial coverage.** Unvisited operating points
+          and unqualified metrics remain unavailable.
+          {% else %}Calibration state unavailable.{% endif %}
+          {% if state_attr('sensor.zehnder_corrected_calibration', 'timer_confirmation_requested') %}
+          The maintenance timer increased. Confirm both filter paths are clean
+          only after checking them; the timer alone does not establish a new reference.
+          {% endif %}
+      - type: markdown
+        title: Reference capture details
+        content: |-
+          Cycle: {{ state_attr('sensor.zehnder_corrected_calibration', 'cycle_id') or 'none' }}.
+          Confirmed: {{ state_attr('sensor.zehnder_corrected_calibration', 'confirmed_at') or 'not yet' }}.
+          {% set counts = state_attr('sensor.zehnder_corrected_calibration', 'candidate_counts') or {} %}
+          {% set refs = state_attr('sensor.zehnder_corrected_calibration', 'references') or {} %}
+          {% for point, metrics in refs.items() %}
+          **{{ point }}:**
+          {% for name, ref in metrics.items() %}
+          - {{ name }}: {{ ref.count }} reports, {{ ref.first_reported_at }} to {{ ref.last_reported_at }};
+            median supply {{ ref.supply_flow_m3h | round(1) }} m³/h,
+            exhaust {{ ref.exhaust_flow_m3h | round(1) }} m³/h.
+          {% endfor %}
+          {% endfor %}
+          {% if not refs %}No qualified reference yet. Candidate counts: {{ counts }}.{% endif %}
+      - type: button
+        name: Confirm both filter paths are clean
+        icon: mdi:air-filter
+        entity: input_button.zehnder_confirm_clean_filters
+        tap_action:
+          action: perform-action
+          perform_action: input_button.press
+          target:
+            entity_id: input_button.zehnder_confirm_clean_filters
+          confirmation:
+            text: Confirm both supply and exhaust filter paths have clean filters after maintenance.
+      - type: entities
+        title: Reference provenance
+        entities:
+          - entity: sensor.zehnder_corrected_calibration
+            name: Corrected calibration state
+          - entity: sensor.zehnder_corrected_sfp_change
+            name: SFP change vs confirmed clean reference
+          - entity: sensor.zehnder_baseline_quality
+            name: Legacy baseline quality (context only)
+      - type: entities
+        title: Matched-flow fan effort
+        entities:
+          - entity: sensor.zehnder_corrected_sfp_change
+            name: SFP change (%)
+          - entity: sensor.zehnder_corrected_supply_duty_change_pp
+            name: Supply duty change (percentage points)
+          - entity: sensor.zehnder_corrected_exhaust_duty_change_pp
+            name: Exhaust duty change (percentage points)
+          - entity: sensor.zehnder_corrected_supply_rpm_flow_change_pct
+            name: Supply RPM per airflow change (%)
+          - entity: sensor.zehnder_corrected_exhaust_rpm_flow_change_pct
+            name: Exhaust RPM per airflow change (%)
+      - type: markdown
+        title: Comparison support
+        content: >-
+          {% set q = states('sensor.zehnder_corrected_comparison_quality') %}
+          {% if q == 'ready' %}Conditioned 15-minute comparison is ready.
+          {% elif q == 'warming_up' %}Warming up: at least five distinct matched observations are required.
+          {% elif q == 'no_matching_reference' %}No matching clean-filter reference for this fan level and both airflows.
+          {% elif q == 'ineligible' %}Current conditions are not eligible for a conditioned comparison.
+          {% else %}Comparison unavailable while current measurement is unavailable.
+          {% endif %}
+          {% set ref = state_attr('sensor.zehnder_corrected_comparison_quality', 'selected_reference') %}
+          Selected reference: {% if ref %}{{ ref.point }} from cycle {{ ref.cycle_id }}{% else %}none{% endif %}.
+          Accepted observations in window: {{ state_attr('sensor.zehnder_corrected_comparison_quality', 'window_count') or 0 }}.
+      - type: entities
+        title: Sustained SFP trend
+        entities:
+          - entity: sensor.zehnder_corrected_sfp_trend
+            name: SFP slope (W/(m³/s)/day)
+          - entity: sensor.zehnder_corrected_trend_quality
+            name: Trend coverage
+      - type: history-graph
+        title: Corrected SFP trend history
+        hours_to_show: 168
+        entities:
+          - sensor.zehnder_corrected_sfp_trend
+      - type: markdown
+        title: Trend evidence
+        content: >-
+          {% set q = states('sensor.zehnder_corrected_trend_quality') %}
+          {% set n = state_attr('sensor.zehnder_corrected_trend_quality', 'bucket_count') or 0 %}
+          {% set span = state_attr('sensor.zehnder_corrected_trend_quality', 'span_hours') or 0 %}
+          {% if q == 'ready' %}Trend ready from {{ n }} nonempty UTC hourly medians spanning {{ span | round(1) }} hours.
+          {% elif q == 'insufficient_coverage' %}Trend warming up: {{ n }} of at least 24 nonempty UTC hours,
+          spanning {{ span | round(1) }} of at least 72 hours.
+          {% elif q == 'no_matching_reference' %}No trend for this unmatched fan level and airflow.
+          {% else %}Trend unavailable while source measurements are unavailable.
+          {% endif %}
+      - type: entities
+        title: Apparent sensible recovery
+        entities:
+          - entity: sensor.zehnder_corrected_recovery_raw
+            name: Current raw apparent recovery (%)
+          - entity: sensor.zehnder_corrected_recovery_conditioned
+            name: 15-minute conditioned median (%)
+          - entity: sensor.zehnder_corrected_recovery_quality
+            name: Current recovery quality
+      - type: markdown
+        title: Recovery interpretation
+        content: >-
+          {% set q = states('sensor.zehnder_corrected_recovery_quality') %}
+          {% set reason = state_attr('sensor.zehnder_corrected_recovery_quality', 'reason') %}
+          {% if q == 'current' %}Current apparent sensible temperature ratio is usable.
+          {% elif q == 'anomalous' %}Anomalous raw ratio outside 0–100%; inspect source temperatures. This is not a healthy recovery reading.
+          {% elif reason == 'small_temperature_difference' %}Outdoor and extract temperatures differ by less than 5°C; recovery is not interpretable.
+          {% elif reason == 'bypass_open' %}Bypass is open; recovery is not comparable.
+          {% elif reason == 'unknown_bypass' %}Bypass status is unknown; recovery is unavailable.
+          {% elif q == 'stale' %}Recovery source reporting is stale.
+          {% else %}Recovery unavailable ({{ reason or q }}).
+          {% endif %}
+          {% if state_attr('sensor.zehnder_corrected_recovery_quality', 'conditioned_state') == 'historical' %}
+          The conditioned median is historical, last reported
+          {{ state_attr('sensor.zehnder_corrected_recovery_quality', 'last_reported_at') }};
+          it does not represent a current raw reading.
+          {% endif %}
+          This is apparent sensible recovery from supply, outdoor, and extract
+          air temperatures, not certified heat-exchanger efficiency.

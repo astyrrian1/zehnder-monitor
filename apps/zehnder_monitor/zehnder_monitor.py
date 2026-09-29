@@ -24,7 +24,14 @@ import os
 import statistics
 import time
 import importlib.util
-from datetime import datetime, timezone
+import math
+import hashlib
+from datetime import datetime, timedelta, timezone
+
+try:
+    from corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend, conditioned_recovery
+except ImportError:
+    from .corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend, conditioned_recovery
 
 try:
     from capability import (
@@ -106,6 +113,7 @@ class ZehnderMonitor(hass.Hass):
     BASELINE_LEARNING_MIN_DAYS = FILTER_CYCLE - 14
     STATE_FILE     = "state.json"
     BASELINE_FILE  = "baselines.json"
+    CORRECTED_FILE = "corrected_v2.json"
     DATA_DIR_ARG   = "data_dir"
 
     # =================================================================
@@ -114,7 +122,9 @@ class ZehnderMonitor(hass.Hass):
 
     def initialize(self):
         self.log("=" * 60)
-        self.log("ZEHNDER MONITOR v1.9.1 -- Physics-Based Filter Health")
+        if self.args.get("isolated_test_mode"):
+            self.TICK_SECONDS = int(self.args.get("test_tick_seconds", self.TICK_SECONDS))
+        self.log("ZEHNDER MONITOR v2 -- Corrected Readings and Legacy Compatibility")
         self.log("=" * 60)
 
         self.sfp = 0.0
@@ -148,6 +158,12 @@ class ZehnderMonitor(hass.Hass):
         self.baseline_timer = None
         self.tick_count = 0
         self.discovery_published = False
+        self.v2_discovery_published = False
+        self.v2_last_fingerprint = None
+        self.v2_accepted_reports = 0
+        self.v2_recent_samples = []
+        self.v2_comparison_samples = []
+        self.v2_recovery_samples = []
 
         loaded_baselines = self._load_json(self.BASELINE_FILE, self._defaults())
         self.baselines = self._migrate_baselines(loaded_baselines)
@@ -155,6 +171,7 @@ class ZehnderMonitor(hass.Hass):
             self._save_json(self.BASELINE_FILE, self.baselines)
         saved = self._load_json(self.STATE_FILE, {})
         self._restore(saved)
+        self.v2_state = self._load_corrected_state()
 
         self.log(
             f"Baselines: SFP={self.baselines['sfp']:.3f}, "
@@ -163,7 +180,10 @@ class ZehnderMonitor(hass.Hass):
         )
         self.log(f"Restored {len(self.sfp_buffer)} conditioned SFP samples.")
 
-        self.run_every(self._tick, "now", self.TICK_SECONDS)
+        handle = self.run_every(self._tick, "now", self.TICK_SECONDS)
+        self.log(f"Evaluation scheduled every {self.TICK_SECONDS}s: {handle}")
+        self.listen_event(self._on_clean_filters_confirmed, "zehnder_monitor_clean_filters_confirmed")
+        self.listen_state(self._on_clean_filter_button, "input_button.zehnder_confirm_clean_filters")
 
     # =================================================================
     # PERSISTENCE
@@ -248,6 +268,228 @@ class ZehnderMonitor(hass.Hass):
             self.log(f"Save {name} failed: {joined}", level="ERROR")
         except Exception as e:
             self.log(f"Save {name} failed: {e}", level="ERROR")
+
+    @staticmethod
+    def _corrected_defaults():
+        return {
+            "schema_version": 2,
+            "calibration": {
+                "state": "awaiting_confirmation",
+                "cycle_id": None,
+                "confirmed_at": None,
+                "settling_until": None,
+                "learning_until": None,
+                "references": {},
+                "candidates": {},
+            },
+            "archived_references": [],
+            "last_filter_days": None,
+            "timer_confirmation_requested": False,
+            "trend_reports": [],
+        }
+
+    def _load_corrected_state(self):
+        """Read only the v2 file; never infer a reference from legacy data."""
+        path = os.path.join(self._data_dir(), self.CORRECTED_FILE)
+        try:
+            with open(path, "r") as stream:
+                data = json.load(stream)
+        except FileNotFoundError:
+            defaults = self._corrected_defaults()
+            self._save_json(self.CORRECTED_FILE, defaults)
+            return defaults
+        except (OSError, json.JSONDecodeError) as exc:
+            self.log(f"Corrected state unavailable at {path}: {exc}", level="ERROR")
+            return self._corrected_defaults()
+        calibration = data.get("calibration") if isinstance(data, dict) else None
+        if (not isinstance(data, dict) or data.get("schema_version") != 2 or not isinstance(calibration, dict)
+                or not isinstance(calibration.get("references"), dict)
+                or calibration.get("state") not in ("awaiting_confirmation", "settling", "learning", "partial", "qualified")):
+            self.log(f"Corrected state invalid at {path}; awaiting confirmation", level="ERROR")
+            return self._corrected_defaults()
+        return data
+
+    def _save_corrected_state(self):
+        self._save_json(self.CORRECTED_FILE, self.v2_state)
+
+    def _confirm_clean_filters(self, event_id, confirmed_at):
+        """Begin a corrected cycle only from an explicit, deduplicated confirmation."""
+        if not isinstance(event_id, str) or not event_id.strip():
+            return False
+        try:
+            confirmed = datetime.fromisoformat(confirmed_at)
+            if confirmed.tzinfo is None:
+                return False
+        except (TypeError, ValueError):
+            return False
+        if event_id in self.v2_state.get("seen_confirmation_ids", []):
+            return False
+        previous = self.v2_state["calibration"]
+        if previous.get("cycle_id"):
+            self.v2_state.setdefault("archived_references", []).append({
+                "cycle_id": previous["cycle_id"],
+                "confirmed_at": previous.get("confirmed_at"),
+                "references": previous.get("references", {}),
+            })
+        self.v2_state.setdefault("seen_confirmation_ids", []).append(event_id)
+        self.v2_state["timer_confirmation_requested"] = False
+        settling = int(self.args.get("test_settling_seconds", 7200)) if self.args.get("isolated_test_mode") else 7200
+        learning = int(self.args.get("test_learning_seconds", 72 * 3600)) if self.args.get("isolated_test_mode") else 72 * 3600
+        self.v2_state["calibration"] = {
+            "state": "settling",
+            "cycle_id": event_id,
+            "confirmed_at": confirmed.isoformat(),
+            "settling_until": (confirmed + timedelta(seconds=settling)).isoformat(),
+            "learning_until": (confirmed + timedelta(seconds=settling + learning)).isoformat(),
+            "references": {},
+            "candidates": {},
+        }
+        self._save_corrected_state()
+        return True
+
+    def _on_clean_filters_confirmed(self, event_name, data, kwargs):
+        """Monitor-only HA event; never calls a ventilation service."""
+        if not isinstance(data, dict) or data.get("both_filter_paths_clean") is not True:
+            return
+        event_id = data.get("event_id")
+        now = datetime.now(timezone.utc)
+        self._confirm_clean_filters(event_id, now.isoformat())
+
+    def _on_clean_filter_button(self, entity, attribute, old, new, kwargs):
+        """A confirmed dashboard press is an explicit maintenance assertion."""
+        if isinstance(new, str) and new and new != old:
+            self._confirm_clean_filters("button:" + new, datetime.now(timezone.utc).isoformat())
+
+    def _collect_corrected_candidate(self, sample, now):
+        """Accumulate distinct eligible reports and freeze each qualified metric."""
+        calibration = getattr(self, "v2_state", self._corrected_defaults())["calibration"]
+        if calibration["state"] not in ("settling", "learning", "partial", "qualified"):
+            return False
+        settling_until = datetime.fromisoformat(calibration["settling_until"])
+        learning_until = datetime.fromisoformat(calibration["learning_until"])
+        if now < settling_until:
+            return False
+        if now > learning_until:
+            if calibration["state"] in ("settling", "learning"):
+                calibration["state"] = "partial"
+                self._save_corrected_state()
+            return False
+        if calibration["state"] == "settling":
+            calibration["state"] = "learning"
+        level = sample.get("fan_level")
+        if level not in ("Low", "Medium"):
+            return False
+        try:
+            supply = float(sample["supply_flow_m3h"])
+            exhaust = float(sample["exhaust_flow_m3h"])
+            reported = datetime.fromisoformat(sample["reported_at"])
+            if reported.tzinfo is None or not all(math.isfinite(x) and x > 0 for x in (supply, exhaust)):
+                return False
+        except (KeyError, TypeError, ValueError):
+            return False
+        if reported < settling_until or reported > learning_until:
+            return False
+        band = round(((supply + exhaust) / 2) / 25) * 25
+        point = f"{level}:{band}"
+        samples = calibration.setdefault("candidates", {}).setdefault(point, [])
+        fingerprint = sample.get("fingerprint")
+        if not fingerprint or any(item["fingerprint"] == fingerprint for item in samples):
+            return False
+        samples.append(sample)
+        references = calibration.setdefault("references", {}).get(point, {})
+        changed = True
+        for metric, required in (
+            ("sfp", ("sfp",)),
+            ("duty", ("supply_duty", "exhaust_duty")),
+            ("rpm_flow", ("supply_rpm", "exhaust_rpm")),
+        ):
+            if metric in references:
+                continue
+            eligible = [item for item in samples if all(item.get(k) is not None for k in required)]
+            if len(eligible) < 20:
+                continue
+            times = [datetime.fromisoformat(item["reported_at"]) for item in eligible]
+            min_span = int(self.args.get("test_min_span_seconds", 1800)) if self.args.get("isolated_test_mode") else 1800
+            if (max(times) - min(times)).total_seconds() < min_span:
+                continue
+            medians = {key: statistics.median(float(item[key]) for item in eligible)
+                       for key in ("supply_flow_m3h", "exhaust_flow_m3h")}
+            if any(medians[key] <= 0 or any(abs(float(item[key]) - medians[key]) / medians[key] > 0.05
+                                             for item in eligible)
+                   for key in medians):
+                continue
+            references[metric] = {
+                "count": len(eligible), "first_reported_at": min(times).isoformat(),
+                "last_reported_at": max(times).isoformat(),
+                "supply_flow_m3h": medians["supply_flow_m3h"],
+                "exhaust_flow_m3h": medians["exhaust_flow_m3h"],
+                **{key: statistics.median(float(item[key]) for item in eligible) for key in required},
+            }
+        if references:
+            calibration["references"][point] = references
+            calibration["state"] = "qualified"
+        self._save_corrected_state()
+        return changed
+
+    def _advance_corrected_calibration(self, now):
+        if not hasattr(self, "v2_state"):
+            return
+        calibration = self.v2_state["calibration"]
+        if calibration["state"] not in ("settling", "learning"):
+            return
+        if now >= datetime.fromisoformat(calibration["learning_until"]):
+            calibration["state"] = "partial"
+        elif now >= datetime.fromisoformat(calibration["settling_until"]):
+            calibration["state"] = "learning"
+        else:
+            return
+        self._save_corrected_state()
+
+    def _observe_corrected_timer(self, source):
+        """A timer increase requests human confirmation; it never proves replacement."""
+        if not isinstance(source, dict):
+            return
+        try:
+            days = float(source["value"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if not math.isfinite(days):
+            return
+        previous = self.v2_state.get("last_filter_days")
+        if previous is not None and days - previous > 90:
+            self.v2_state["timer_confirmation_requested"] = True
+        if previous != days:
+            self.v2_state["last_filter_days"] = days
+            self._save_corrected_state()
+
+    def _corrected_now(self):
+        """Real UTC clock, with a source-driven override only in the isolated stack."""
+        if getattr(self, "args", {}).get("isolated_test_mode"):
+            raw = self.get_state("sensor.zehnder_monitor_test_clock")
+            try:
+                synthetic = datetime.fromisoformat(raw)
+                if synthetic.tzinfo is not None:
+                    return synthetic.astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                pass
+        return datetime.now(timezone.utc)
+
+    def _prune_corrected_trend(self, now):
+        if not hasattr(self, "v2_state"):
+            return
+        cutoff = now - timedelta(days=7)
+        retained = []
+        reports = self.v2_state.get("trend_reports", [])
+        for report in reports if isinstance(reports, list) else []:
+            try:
+                timestamp = datetime.fromisoformat(report["reported_at"])
+                if timestamp.tzinfo and cutoff <= timestamp <= now:
+                    retained.append(report)
+            except (KeyError, TypeError, ValueError):
+                continue
+        if retained != reports:
+            self.v2_state["trend_reports"] = retained
+            self._save_corrected_state()
 
     def _persist(self):
         cutoff = time.time() - (self.BUFFER_HOURS * 3600)
@@ -538,11 +780,11 @@ class ZehnderMonitor(hass.Hass):
         # RPM per unit flow -- direct impeller resistance proxy
         self.supply_rpm_per_flow = (
             r["supply_rpm"] / r["supply_flow"]
-            if r["supply_flow"] and r["supply_flow"] > 10 else 0.0
+            if r["supply_rpm"] is not None and r["supply_flow"] and r["supply_flow"] > 10 else 0.0
         )
         self.exhaust_rpm_per_flow = (
             r["exhaust_rpm"] / r["exhaust_flow"]
-            if r["exhaust_flow"] and r["exhaust_flow"] > 10 else 0.0
+            if r["exhaust_rpm"] is not None and r["exhaust_flow"] and r["exhaust_flow"] > 10 else 0.0
         )
 
         # Heat recovery is only meaningful from fresh, synchronous temperatures.
@@ -929,6 +1171,318 @@ class ZehnderMonitor(hass.Hass):
     # MQTT
     # =================================================================
 
+    def _publish_corrected_sfp(self):
+        """Publish a separate SFP reading with its exact source measurements."""
+        inputs = {}
+        for key in (
+            "power", "supply_flow", "exhaust_flow", "supply_duty", "exhaust_duty",
+            "supply_rpm", "exhaust_rpm", "bypass", "supply_temp", "outdoor_temp",
+            "extract_temp", "fan_level", "filter_days",
+        ):
+            source = self.get_state(self.E[key], attribute="all")
+            if not isinstance(source, dict):
+                inputs[key] = None
+                continue
+            raw_value = source.get("state")
+            try:
+                numeric = float(raw_value)
+                value = numeric if math.isfinite(numeric) else str(raw_value)
+            except (TypeError, ValueError):
+                value = raw_value
+            attributes = source.get("attributes") or {}
+            inputs[key] = {
+                "value": value,
+                "unit": attributes.get("unit_of_measurement"),
+                "reported_at": (
+                    attributes["source_reported_at"]
+                    if "source_reported_at" in attributes
+                    else source.get("last_reported") or source.get("last_updated")
+                ),
+            }
+        if not getattr(self, "v2_discovery_published", False):
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/sfp/config", payload=json.dumps({
+                "name": "Zehnder Corrected SFP",
+                "unique_id": "zehnder_monitor_v2_sfp",
+                "default_entity_id": "sensor.zehnder_corrected_sfp",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.sfp }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'inputs': value_json.inputs, 'calculated_at': value_json.calculated_at} | tojson }}",
+                "unit_of_measurement": "kW/(m³/s)",
+                "state_class": "measurement",
+                "suggested_display_precision": 3,
+                "icon": "mdi:speedometer",
+                "availability_topic": "zehnder/monitor/v2/state",
+                "availability_template": "{{ 'online' if value_json.quality == 'current' else 'offline' }}",
+                "expire_after": 180,
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/quality/config", payload=json.dumps({
+                "name": "Zehnder Corrected SFP Quality",
+                "unique_id": "zehnder_monitor_v2_sfp_quality",
+                "default_entity_id": "sensor.zehnder_corrected_sfp_quality",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.quality }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'calculated_at': value_json.calculated_at, 'reason': value_json.reason, 'fan_effort_quality': value_json.fan_effort_quality, 'fan_effort_reason': value_json.fan_effort_reason, 'recovery_quality': value_json.recovery_quality, 'recovery_reason': value_json.recovery_reason, 'baseline_eligible': value_json.baseline_eligible, 'eligibility_reason': value_json.eligibility_reason, 'accepted_reports': value_json.accepted_reports} | tojson }}",
+                "expire_after": 180,
+                "icon": "mdi:check-decagram",
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/calibration/config", payload=json.dumps({
+                "name": "Zehnder Corrected Calibration",
+                "unique_id": "zehnder_monitor_v2_calibration",
+                "default_entity_id": "sensor.zehnder_corrected_calibration",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.calibration.state }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'calculated_at': value_json.calculated_at, 'cycle_id': value_json.calibration.cycle_id, 'confirmed_at': value_json.calibration.confirmed_at, 'settling_until': value_json.calibration.settling_until, 'learning_until': value_json.calibration.learning_until, 'candidate_counts': value_json.calibration.candidate_counts, 'references': value_json.calibration.references, 'timer_confirmation_requested': value_json.calibration.timer_confirmation_requested} | tojson }}",
+                "expire_after": 180,
+                "icon": "mdi:database-clock",
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/sfp_change/config", payload=json.dumps({
+                "name": "Zehnder Corrected SFP Change",
+                "unique_id": "zehnder_monitor_v2_sfp_change",
+                "default_entity_id": "sensor.zehnder_corrected_sfp_change",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.comparison.sfp_change_pct }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'quality': value_json.comparison.quality, 'selected_reference': value_json.comparison.selected_reference, 'window_count': value_json.comparison.window_count, 'window_minutes': 15} | tojson }}",
+                "availability_topic": "zehnder/monitor/v2/state",
+                "availability_template": "{{ 'online' if value_json.comparison.sfp_change_pct is not none else 'offline' }}",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "expire_after": 180,
+                "icon": "mdi:chart-line",
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/comparison_quality/config", payload=json.dumps({
+                "name": "Zehnder Corrected Comparison Quality",
+                "unique_id": "zehnder_monitor_v2_comparison_quality",
+                "default_entity_id": "sensor.zehnder_corrected_comparison_quality",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.comparison.quality }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'selected_reference': value_json.comparison.selected_reference, 'window_count': value_json.comparison.window_count, 'window_minutes': 15} | tojson }}",
+                "expire_after": 180,
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            for field, name, unit in (
+                ("supply_duty_change_pp", "Supply Duty Change", "pp"),
+                ("exhaust_duty_change_pp", "Exhaust Duty Change", "pp"),
+                ("supply_rpm_flow_change_pct", "Supply RPM per Flow Change", "%"),
+                ("exhaust_rpm_flow_change_pct", "Exhaust RPM per Flow Change", "%"),
+            ):
+                self.call_service("mqtt/publish", topic=f"homeassistant/sensor/zehnder_monitor_v2/{field}/config", payload=json.dumps({
+                    "name": "Zehnder Corrected " + name,
+                    "unique_id": "zehnder_monitor_v2_" + field,
+                    "default_entity_id": "sensor.zehnder_corrected_" + field,
+                    "state_topic": "zehnder/monitor/v2/state",
+                    "value_template": "{{ value_json.comparison." + field + " }}",
+                    "availability_topic": "zehnder/monitor/v2/state",
+                    "availability_template": "{{ 'online' if value_json.comparison." + field + " is not none else 'offline' }}",
+                    "unit_of_measurement": unit,
+                    "state_class": "measurement", "expire_after": 180,
+                    "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+                }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/sfp_trend/config", payload=json.dumps({
+                "name": "Zehnder Corrected SFP Trend",
+                "unique_id": "zehnder_monitor_v2_sfp_trend",
+                "default_entity_id": "sensor.zehnder_corrected_sfp_trend",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.trend.slope_w_per_m3s_day }}",
+                "availability_topic": "zehnder/monitor/v2/state",
+                "availability_template": "{{ 'online' if value_json.trend.quality == 'ready' else 'offline' }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'quality': value_json.trend.quality, 'bucket_count': value_json.trend.bucket_count, 'span_hours': value_json.trend.span_hours, 'first_hour': value_json.trend.first_hour, 'last_hour': value_json.trend.last_hour, 'cycle_id': value_json.trend.cycle_id, 'point': value_json.trend.point} | tojson }}",
+                "unit_of_measurement": "W/(m³/s)/day", "state_class": "measurement",
+                "expire_after": 180,
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/trend_quality/config", payload=json.dumps({
+                "name": "Zehnder Corrected Trend Quality",
+                "unique_id": "zehnder_monitor_v2_trend_quality",
+                "default_entity_id": "sensor.zehnder_corrected_trend_quality",
+                "state_topic": "zehnder/monitor/v2/state",
+                "value_template": "{{ value_json.trend.quality }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'bucket_count': value_json.trend.bucket_count, 'span_hours': value_json.trend.span_hours, 'first_hour': value_json.trend.first_hour, 'last_hour': value_json.trend.last_hour, 'cycle_id': value_json.trend.cycle_id, 'point': value_json.trend.point} | tojson }}",
+                "expire_after": 180,
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            for key, title, template, availability in (
+                ("recovery_raw", "Apparent Sensible Recovery", "{{ value_json.recovery.raw_pct }}",
+                 "{{ 'online' if value_json.recovery.raw_pct is not none else 'offline' }}"),
+                ("recovery_conditioned", "Conditioned Apparent Recovery", "{{ value_json.recovery.conditioned_pct }}",
+                 "{{ 'online' if value_json.recovery.conditioned_pct is not none else 'offline' }}"),
+            ):
+                self.call_service("mqtt/publish", topic=f"homeassistant/sensor/zehnder_monitor_v2/{key}/config", payload=json.dumps({
+                    "name": "Zehnder Corrected " + title,
+                    "unique_id": "zehnder_monitor_v2_" + key,
+                    "default_entity_id": "sensor.zehnder_corrected_" + key,
+                    "state_topic": "zehnder/monitor/v2/state", "value_template": template,
+                    "availability_topic": "zehnder/monitor/v2/state", "availability_template": availability,
+                    "json_attributes_topic": "zehnder/monitor/v2/state",
+                    "json_attributes_template": "{{ {'quality': value_json.recovery.quality, 'reason': value_json.recovery.reason, 'conditioned_state': value_json.recovery.conditioned_state, 'conditioned_count': value_json.recovery.conditioned_count, 'last_reported_at': value_json.recovery.last_reported_at, 'age_seconds': value_json.recovery.age_seconds, 'window_seconds': value_json.recovery.window_seconds, 'temperatures_c': value_json.recovery.temperatures_c} | tojson }}",
+                    "unit_of_measurement": "%", "state_class": "measurement", "expire_after": 180,
+                    "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+                }), retain=True)
+            self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/recovery_quality/config", payload=json.dumps({
+                "name": "Zehnder Corrected Recovery Quality",
+                "unique_id": "zehnder_monitor_v2_recovery_quality",
+                "default_entity_id": "sensor.zehnder_corrected_recovery_quality",
+                "state_topic": "zehnder/monitor/v2/state", "value_template": "{{ value_json.recovery.quality }}",
+                "json_attributes_topic": "zehnder/monitor/v2/state",
+                "json_attributes_template": "{{ {'reason': value_json.recovery.reason, 'conditioned_state': value_json.recovery.conditioned_state, 'conditioned_count': value_json.recovery.conditioned_count, 'last_reported_at': value_json.recovery.last_reported_at, 'age_seconds': value_json.recovery.age_seconds, 'window_seconds': value_json.recovery.window_seconds, 'temperatures_c': value_json.recovery.temperatures_c} | tojson }}",
+                "expire_after": 180,
+                "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
+            }), retain=True)
+            self.v2_discovery_published = True
+        result = evaluate_sfp(inputs, self._corrected_now().isoformat())
+        if hasattr(self, "v2_state"):
+            self._observe_corrected_timer(inputs.get("filter_days"))
+        fan_effort = evaluate_fan_effort(inputs, result["calculated_at"])
+        recovery = evaluate_recovery_inputs(inputs, result["calculated_at"])
+        eligible, eligibility_reason, recent = evaluate_sampling_eligibility(
+            inputs, result, getattr(self, "v2_recent_samples", []), result["calculated_at"]
+        )
+        self.v2_recent_samples = recent if eligibility_reason in ("warming_up", "stable_conditions", "unstable") else []
+        sample = None
+        if result["quality"] == "current" and result["fingerprint"] != getattr(self, "v2_last_fingerprint", None):
+            self.v2_accepted_reports = getattr(self, "v2_accepted_reports", 0) + 1
+            self.v2_last_fingerprint = result["fingerprint"]
+            if eligible:
+                def number(key):
+                    source = inputs.get(key)
+                    if not isinstance(source, dict) or source.get("unit") not in UNITS[key]:
+                        return None
+                    try:
+                        value = float(source["value"]) * UNITS[key][source["unit"]]
+                    except (TypeError, ValueError):
+                        return None
+                    return value if math.isfinite(value) else None
+                sample = {
+                    "fingerprint": result["fingerprint"],
+                    "reported_at": max(inputs[key]["reported_at"] for key in ("power", "supply_flow", "exhaust_flow")),
+                    "fan_level": inputs["fan_level"]["value"],
+                    "supply_flow_m3h": number("supply_flow"),
+                    "exhaust_flow_m3h": number("exhaust_flow"),
+                    "sfp": result["sfp"],
+                    "supply_duty": number("supply_duty"),
+                    "exhaust_duty": number("exhaust_duty"),
+                    "supply_rpm": number("supply_rpm"),
+                    "exhaust_rpm": number("exhaust_rpm"),
+                }
+                self.v2_last_sample = sample
+                self._collect_corrected_candidate(sample, datetime.fromisoformat(result["calculated_at"]))
+        if eligible and sample is None and getattr(self, "v2_last_sample", {}).get("fingerprint") == result.get("fingerprint"):
+            sample = self.v2_last_sample
+        calibration = getattr(self, "v2_state", self._corrected_defaults())["calibration"]
+        comparison = {"quality": "unavailable", "selected_reference": None, "window_count": 0,
+                      "sfp_change_pct": None, "supply_duty_change_pp": None,
+                      "exhaust_duty_change_pp": None, "supply_rpm_flow_change_pct": None,
+                      "exhaust_rpm_flow_change_pct": None}
+        trend = {"quality": "unavailable", "slope_w_per_m3s_day": None,
+                 "bucket_count": 0, "span_hours": 0, "first_hour": None,
+                 "last_hour": None, "cycle_id": calibration.get("cycle_id"), "point": None}
+        if result["quality"] == "current":
+            supply_flow = float(inputs["supply_flow"]["value"]) * UNITS["supply_flow"][inputs["supply_flow"]["unit"]]
+            exhaust_flow = float(inputs["exhaust_flow"]["value"]) * UNITS["exhaust_flow"][inputs["exhaust_flow"]["unit"]]
+            level = inputs.get("fan_level", {}).get("value") if isinstance(inputs.get("fan_level"), dict) else None
+            selected = select_reference(calibration, level, supply_flow, exhaust_flow)
+            if selected is None:
+                comparison["quality"] = "no_matching_reference"
+                trend["quality"] = "no_matching_reference"
+            else:
+                comparison["selected_reference"] = selected
+                trend["point"] = selected["point"]
+                if eligible and sample is not None:
+                    values, self.v2_comparison_samples = conditioned_comparison(
+                        sample, selected, getattr(self, "v2_comparison_samples", []),
+                        datetime.fromisoformat(result["calculated_at"]),
+                        int(self.args.get("test_comparison_window_seconds", 900)) if self.args.get("isolated_test_mode") else 900,
+                    )
+                else:
+                    values = None
+                comparison["window_count"] = len(getattr(self, "v2_comparison_samples", []))
+                if values is None:
+                    comparison["quality"] = "warming_up" if eligible else "ineligible"
+                else:
+                    comparison.update({key: round(value, 3) for key, value in values.items()})
+                    comparison["quality"] = "ready"
+                if hasattr(self, "v2_state"):
+                    now = datetime.fromisoformat(result["calculated_at"])
+                    cutoff = now - timedelta(days=7)
+                    reports = [report for report in self.v2_state.get("trend_reports", [])
+                               if datetime.fromisoformat(report["reported_at"]) >= cutoff]
+                    if eligible and sample is not None and not any(
+                        report["fingerprint"] == sample["fingerprint"]
+                        and report["cycle_id"] == selected["cycle_id"]
+                        and report["point"] == selected["point"] for report in reports
+                    ):
+                        reports.append({"fingerprint": sample["fingerprint"],
+                                        "reported_at": sample["reported_at"], "sfp": sample["sfp"],
+                                        "cycle_id": selected["cycle_id"], "point": selected["point"]})
+                        self.v2_state["trend_reports"] = reports
+                        self._save_corrected_state()
+                    trend.update(hourly_sfp_trend(reports, selected["cycle_id"], selected["point"], now))
+                    if trend["slope_w_per_m3s_day"] is not None:
+                        trend["slope_w_per_m3s_day"] = round(trend["slope_w_per_m3s_day"], 1)
+                    trend.update(cycle_id=selected["cycle_id"], point=selected["point"])
+        visible_calibration = {key: value for key, value in calibration.items() if key != "candidates"}
+        visible_calibration.setdefault("settling_until", None)
+        visible_calibration.setdefault("learning_until", None)
+        visible_calibration["candidate_counts"] = {
+            point: len(samples) for point, samples in calibration.get("candidates", {}).items()
+        }
+        visible_calibration["timer_confirmation_requested"] = self.v2_state.get("timer_confirmation_requested", False) if hasattr(self, "v2_state") else False
+        recovery_keys = ("supply_temp", "outdoor_temp", "extract_temp", "bypass", "supply_flow", "exhaust_flow")
+        recovery_fingerprint = hashlib.sha256(json.dumps(
+            {key: inputs.get(key) for key in recovery_keys}, sort_keys=True
+        ).encode()).hexdigest()
+        current_recovery = recovery["apparent_sensible_recovery_pct"] if recovery["quality"] == "current" else None
+        now = datetime.fromisoformat(result["calculated_at"])
+        source_reported = max(inputs[key]["reported_at"] for key in recovery_keys) if current_recovery is not None else None
+        conditioned, self.v2_recovery_samples = conditioned_recovery(
+            current_recovery, recovery_fingerprint if current_recovery is not None else None,
+            now, getattr(self, "v2_recovery_samples", []),
+            int(self.args.get("test_recovery_window_seconds", 900)) if getattr(self, "args", {}).get("isolated_test_mode") else 900,
+            source_reported,
+        )
+        last_reported = self.v2_recovery_samples[-1]["reported_at"] if self.v2_recovery_samples else None
+        recovery_detail = {
+            "raw_pct": round(recovery["apparent_sensible_recovery_pct"], 1) if recovery["apparent_sensible_recovery_pct"] is not None else None,
+            "quality": recovery["quality"], "reason": recovery["reason"],
+            "temperatures_c": recovery["temperatures_c"],
+            "conditioned_pct": round(conditioned, 1) if conditioned is not None else None,
+            "conditioned_state": "historical" if conditioned is not None and current_recovery is None else ("ready" if conditioned is not None else "warming_up"),
+            "conditioned_count": len(self.v2_recovery_samples),
+            "last_reported_at": last_reported,
+            "age_seconds": round((now - datetime.fromisoformat(last_reported)).total_seconds(), 1) if last_reported else None,
+            "window_seconds": 900,
+        }
+        payload = {
+            "sfp": round(result["sfp"], 4) if result["sfp"] is not None else None,
+            "inputs": inputs,
+            "calculated_at": result["calculated_at"],
+            "quality": result["quality"],
+            "reason": result["reason"],
+            "fan_effort_quality": fan_effort["quality"],
+            "fan_effort_reason": fan_effort["reason"],
+            "recovery_quality": recovery["quality"],
+            "recovery_reason": recovery["reason"],
+            "baseline_eligible": eligible,
+            "eligibility_reason": eligibility_reason,
+            "accepted_reports": getattr(self, "v2_accepted_reports", 0),
+            "calibration": visible_calibration,
+            "comparison": comparison,
+            "trend": trend,
+            "recovery": recovery_detail,
+        }
+        self.call_service("mqtt/publish", topic="zehnder/monitor/v2/state", payload=json.dumps(payload, allow_nan=False), retain=False)
+        return result["quality"]
+
     def _publish_mqtt_discovery(self):
         device = {
             "identifiers": ["zehnder_monitor"],
@@ -1183,21 +1737,51 @@ class ZehnderMonitor(hass.Hass):
     # MASTER TICK
     # =================================================================
 
+    def _prune_history(self):
+        now = time.time()
+        cutoff = now - self.BUFFER_HOURS * 3600
+        for name in ("sfp_buffer", "ratio_buffer", "rpm_ratio_buffer", "heat_recovery_buffer"):
+            if hasattr(self, name):
+                setattr(self, name, [(t, value) for t, value in getattr(self, name) if t > cutoff])
+        if hasattr(self, "baseline_candidate_buffer"):
+            baseline_cutoff = now - self.BASELINE_CANDIDATE_HOURS * 3600
+            self.baseline_candidate_buffer = [
+                sample for sample in self.baseline_candidate_buffer
+                if sample.get("time", 0) > baseline_cutoff
+            ]
+
     def _tick(self, kwargs):
         self.tick_count += 1
+        self.log(f"Evaluation tick {self.tick_count}")
+        self._prune_history()
+        self._prune_corrected_trend(self._corrected_now())
+        self._advance_corrected_calibration(datetime.now(timezone.utc))
+        try:
+            v2_quality = self._publish_corrected_sfp()
+        except Exception as exc:
+            self.log(f"Corrected SFP publisher failed: {exc}", level="ERROR")
+            return
+        if v2_quality != "current":
+            return
         r = self._read()
         if r is None:
             if self.tick_count % 10 == 0:
                 self.log("Unit offline.", level="WARNING")
             return
+        if r.get("supply_rpm") is None or r.get("exhaust_rpm") is None:
+            return
 
-        self._compute(r)
-        self._sample(r)
-        self._detect_change(r)
-        self._health(r)
-        if not self.discovery_published:
-            self.discovery_published = self._publish_mqtt_discovery()
-        self._publish_mqtt(r)
+        try:
+            self._compute(r)
+            self._sample(r)
+            self._detect_change(r)
+            self._health(r)
+            if not self.discovery_published:
+                self.discovery_published = self._publish_mqtt_discovery()
+            self._publish_mqtt(r)
+        except Exception as exc:
+            self.log(f"Legacy monitor evaluation failed: {exc}", level="ERROR")
+            return
 
         if self.tick_count % 5 == 0:
             self._persist()
