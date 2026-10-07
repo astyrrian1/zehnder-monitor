@@ -31,6 +31,17 @@ class ObservationTest(unittest.TestCase):
         self.assertTrue(result['expired_presented_current'])
         self.assertTrue(result['malformed_numeric'])
 
+    def test_incomplete_or_gapped_observation_cannot_pass(self):
+        now = datetime(2026, 10, 6, tzinfo=timezone.utc)
+        row = {'reachable': True, 'publication_delivered': True,
+               'expired_presented_current': False, 'malformed_numeric': False}
+        self.assertTrue(callable(getattr(MODULE, 'summarize', None)),
+                        'Observation must validate duration and sampling continuity')
+        rows = [{**row, 'observed_at': (now + timedelta(seconds=i*60)).isoformat()} for i in range(1440)]
+        self.assertTrue(MODULE.summarize(rows, now + timedelta(days=1), 24, 60)['passed'])
+        self.assertFalse(MODULE.summarize(rows[:1], now + timedelta(days=1), 24, 60)['passed'])
+        self.assertFalse(MODULE.summarize(rows[:100]+rows[130:], now + timedelta(days=1), 24, 60)['passed'])
+
 
 if __name__ == '__main__':
     unittest.main()

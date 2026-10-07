@@ -50,6 +50,32 @@ def evaluate(quality, sfp, now):
     return result
 
 
+def summarize(rows, finished, hours, interval):
+    reachable = [row for row in rows if row.get('reachable')]
+    delivery = sum(row.get('publication_delivered', False) for row in reachable)
+    report = {'started_at': rows[0]['observed_at'] if rows else None,
+              'finished_at': finished.isoformat(),
+              'total_polls': len(rows), 'reachable_polls': len(reachable),
+              'delivery_ratio_reachable': delivery / len(reachable) if reachable else 0,
+              'expired_presented_current': sum(row.get('expired_presented_current', False) for row in rows),
+              'malformed_numeric': sum(row.get('malformed_numeric', False) for row in rows)}
+    times = [datetime.fromisoformat(row['observed_at']) for row in rows]
+    elapsed = (finished - times[0]).total_seconds() if times else 0
+    gaps = [(b-a).total_seconds() for a,b in zip(times,times[1:])]
+    tail = (finished-times[-1]).total_seconds() if times else float('inf')
+    expected = math.ceil(hours * 3600 / interval)
+    report.update(expected_polls=expected, sampling_ratio=len(rows)/expected,
+                  max_sampling_gap_seconds=max([tail, *gaps]), observed_seconds=elapsed)
+    report['passed'] = (report['delivery_ratio_reachable'] >= .995
+                        and report['expired_presented_current'] == 0
+                        and report['malformed_numeric'] == 0
+                        and len(reachable) > 0
+                        and elapsed >= hours * 3600
+                        and len(rows) >= expected * .995
+                        and report['max_sampling_gap_seconds'] <= interval * 2 + 5)
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--hours', type=float, default=24)
@@ -81,18 +107,7 @@ def main():
             stream.write(json.dumps(row) + '\n')
             stream.flush()
             time.sleep(max(0, args.interval_seconds - (time.monotonic() - began)))
-    reachable = [row for row in rows if row.get('reachable')]
-    delivery = sum(row.get('publication_delivered', False) for row in reachable)
-    report = {'started_at': rows[0]['observed_at'] if rows else None,
-              'finished_at': datetime.now(timezone.utc).isoformat(),
-              'total_polls': len(rows), 'reachable_polls': len(reachable),
-              'delivery_ratio_reachable': delivery / len(reachable) if reachable else 0,
-              'expired_presented_current': sum(row.get('expired_presented_current', False) for row in rows),
-              'malformed_numeric': sum(row.get('malformed_numeric', False) for row in rows)}
-    report['passed'] = (report['delivery_ratio_reachable'] >= .995
-                        and report['expired_presented_current'] == 0
-                        and report['malformed_numeric'] == 0
-                        and len(reachable) > 0)
+    report = summarize(rows, datetime.now(timezone.utc), args.hours, args.interval_seconds)
     report_path = args.output.with_suffix('.summary.json')
     report_path.write_text(json.dumps(report, indent=2))
     print(json.dumps(report), flush=True)

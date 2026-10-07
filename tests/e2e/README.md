@@ -104,3 +104,11 @@ production, use `verify_live_v2.py` for read-only live calculation acceptance,
 `observe_v2.py --hours 24 --interval-seconds 60` for passive observation.
 These production readers use `ZMON_OBSERVE_HA_URL` and
 `ZMON_OBSERVE_HA_TOKEN`; they do not write HA state.
+
+After the integrated chain, run `run_quality_regressions.py` with the same
+isolated environment. It holds bypass and connection timestamps unchanged while
+power and airflow remain fresh, verifies recovery and sampling, rejects an
+out-of-range duty independently, and tests disconnect/reconnect withholding.
+It confirms maintenance only in the isolated stack to verify that invalid optional
+metrics cannot qualify references. It never controls ventilation. Unlike `seed.py`, this
+journey deliberately does not refresh every source on every observation.

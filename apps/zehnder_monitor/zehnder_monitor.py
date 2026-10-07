@@ -29,9 +29,9 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 
 try:
-    from corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend, conditioned_recovery
+    from corrected import UNITS, _validate_dynamic, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend, conditioned_recovery
 except ImportError:
-    from .corrected import UNITS, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend, conditioned_recovery
+    from .corrected import UNITS, _validate_dynamic, evaluate_sfp, evaluate_fan_effort, evaluate_recovery_inputs, evaluate_sampling_eligibility, select_reference, conditioned_comparison, hourly_sfp_trend, conditioned_recovery
 
 try:
     from capability import (
@@ -307,7 +307,76 @@ class ZehnderMonitor(hass.Hass):
                 or calibration.get("state") not in ("awaiting_confirmation", "settling", "learning", "partial", "qualified")):
             self.log(f"Corrected state invalid at {path}; awaiting confirmation", level="ERROR")
             return self._corrected_defaults()
+        try:
+            self._validate_corrected_storage(data)
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            self.log(f"Corrected state incomplete at {path}: {exc}; awaiting confirmation", level="ERROR")
+            return self._corrected_defaults()
         return data
+
+    @staticmethod
+    def _validate_corrected_storage(data):
+        def stamp(raw):
+            value = datetime.fromisoformat(raw)
+            if value.tzinfo is None:
+                raise ValueError("naive storage timestamp")
+            return value
+
+        def finite(value, minimum=0, maximum=None):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("invalid stored number")
+            if not math.isfinite(value) or value < minimum or (maximum is not None and value > maximum):
+                raise ValueError("out-of-range stored number")
+
+        c = data["calibration"]
+        for key in ("seen_confirmation_ids", "archived_references", "trend_reports"):
+            if not isinstance(data.get(key, []), list):
+                raise ValueError("invalid " + key)
+        if data.get("last_filter_days") is not None:
+            finite(data["last_filter_days"], float("-inf"))
+        if not isinstance(data.get("timer_confirmation_requested", False), bool):
+            raise ValueError("invalid timer confirmation flag")
+        if any(not isinstance(event, str) or not event for event in data.get("seen_confirmation_ids", [])):
+            raise ValueError("invalid confirmation identity")
+        if not isinstance(c.get("candidates", {}), dict):
+            raise ValueError("invalid candidates")
+        if c["state"] != "awaiting_confirmation":
+            if not isinstance(c.get("cycle_id"), str) or not c["cycle_id"]:
+                raise ValueError("missing cycle identity")
+            if not stamp(c["confirmed_at"]) <= stamp(c["settling_until"]) <= stamp(c["learning_until"]):
+                raise ValueError("invalid deadlines")
+        elif c["references"] or c.get("candidates"):
+            raise ValueError("unconfirmed references")
+        for point, metrics in c["references"].items():
+            if not isinstance(point, str) or not isinstance(metrics, dict):
+                raise ValueError("invalid reference")
+            for metric, ref in metrics.items():
+                keys = {"sfp": ("sfp",), "duty": ("supply_duty", "exhaust_duty"),
+                        "rpm_flow": ("supply_rpm", "exhaust_rpm")}[metric]
+                finite(ref["count"], 20)
+                if stamp(ref["last_reported_at"]) < stamp(ref["first_reported_at"]):
+                    raise ValueError("invalid reference times")
+                for key in ("supply_flow_m3h", "exhaust_flow_m3h", *keys):
+                    finite(ref[key], 0 if key.endswith("duty") else 1e-12,
+                           100 if key.endswith("duty") else None)
+        for samples in c.get("candidates", {}).values():
+            if not isinstance(samples, list):
+                raise ValueError("invalid candidate list")
+            for sample in samples:
+                stamp(sample["reported_at"])
+                if not isinstance(sample["fingerprint"], str):
+                    raise ValueError("invalid fingerprint")
+                for key in ("sfp", "supply_flow_m3h", "exhaust_flow_m3h"):
+                    finite(sample[key], 1e-12)
+                for key in ("supply_duty", "exhaust_duty", "supply_rpm", "exhaust_rpm"):
+                    if sample.get(key) is not None:
+                        finite(sample[key], 0, 100 if key.endswith("duty") else None)
+        for report in data.get("trend_reports", []):
+            stamp(report["reported_at"])
+            finite(report["sfp"])
+            for key in ("cycle_id", "point", "fingerprint"):
+                if not isinstance(report[key], str):
+                    raise ValueError("invalid trend identity")
 
     def _save_corrected_state(self):
         self._save_json(self.CORRECTED_FILE, self.v2_state)
@@ -344,6 +413,9 @@ class ZehnderMonitor(hass.Hass):
             "references": {},
             "candidates": {},
         }
+        self.v2_recent_samples = []
+        self.v2_comparison_samples = []
+        self.v2_last_sample = {}
         self._save_corrected_state()
         return True
 
@@ -1177,7 +1249,7 @@ class ZehnderMonitor(hass.Hass):
         for key in (
             "power", "supply_flow", "exhaust_flow", "supply_duty", "exhaust_duty",
             "supply_rpm", "exhaust_rpm", "bypass", "supply_temp", "outdoor_temp",
-            "extract_temp", "fan_level", "filter_days",
+            "extract_temp", "fan_level", "filter_days", "status",
         ):
             source = self.get_state(self.E[key], attribute="all")
             if not isinstance(source, dict):
@@ -1199,6 +1271,10 @@ class ZehnderMonitor(hass.Hass):
                     else source.get("last_reported") or source.get("last_updated")
                 ),
             }
+            if key == "status":
+                inputs[key]["connected_at"] = (
+                    attributes.get("source_reported_at") or source.get("last_changed")
+                    or inputs[key]["reported_at"])
         if not getattr(self, "v2_discovery_published", False):
             self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/sfp/config", payload=json.dumps({
                 "name": "Zehnder Corrected SFP",
@@ -1354,14 +1430,11 @@ class ZehnderMonitor(hass.Hass):
             self.v2_last_fingerprint = result["fingerprint"]
             if eligible:
                 def number(key):
-                    source = inputs.get(key)
-                    if not isinstance(source, dict) or source.get("unit") not in UNITS[key]:
+                    value, quality, _ = _validate_dynamic(
+                        inputs, key, datetime.fromisoformat(result["calculated_at"]))
+                    if quality != "current" or (key.endswith("rpm") and value <= 0):
                         return None
-                    try:
-                        value = float(source["value"]) * UNITS[key][source["unit"]]
-                    except (TypeError, ValueError):
-                        return None
-                    return value if math.isfinite(value) else None
+                    return value
                 sample = {
                     "fingerprint": result["fingerprint"],
                     "reported_at": max(inputs[key]["reported_at"] for key in ("power", "supply_flow", "exhaust_flow")),
@@ -1753,10 +1826,10 @@ class ZehnderMonitor(hass.Hass):
     def _tick(self, kwargs):
         self.tick_count += 1
         self.log(f"Evaluation tick {self.tick_count}")
-        self._prune_history()
-        self._prune_corrected_trend(self._corrected_now())
-        self._advance_corrected_calibration(datetime.now(timezone.utc))
         try:
+            self._prune_history()
+            self._prune_corrected_trend(self._corrected_now())
+            self._advance_corrected_calibration(datetime.now(timezone.utc))
             v2_quality = self._publish_corrected_sfp()
         except Exception as exc:
             self.log(f"Corrected SFP publisher failed: {exc}", level="ERROR")

@@ -1,0 +1,150 @@
+{
+  "started_at": "2026-10-07T00:46:55.624526+00:00",
+  "journeys": [
+    {
+      "journey": "milestone-1",
+      "exit_code": 0,
+      "seconds": 7.6,
+      "last_output": [
+        "input_to_ha_seconds=1.26 power_w=79.2"
+      ]
+    },
+    {
+      "journey": "milestone-2",
+      "exit_code": 0,
+      "seconds": 224.2,
+      "last_output": [
+        "Milestone 2 isolated HA/MQTT/AppDaemon API journey passed"
+      ]
+    },
+    {
+      "journey": "milestone-3",
+      "exit_code": 0,
+      "seconds": 11.4,
+      "last_output": [
+        "Milestone 3 fresh-install and legacy-upgrade journeys passed"
+      ]
+    },
+    {
+      "journey": "milestone-3-quiet",
+      "exit_code": 0,
+      "seconds": 601.3,
+      "last_output": [
+        "{\"seconds\": 601, \"checks\": 11, \"calibration\": \"awaiting_confirmation\", \"notices\": []}"
+      ]
+    },
+    {
+      "journey": "milestone-4",
+      "exit_code": 0,
+      "seconds": 144.8,
+      "last_output": [
+        "{\"result\": \"pass\", \"cycle_id\": \"e2e-m4-20261007010105\", \"settling_seconds\": 6, \"learning_seconds\": 120, \"reference_metrics\": [\"sfp\", \"duty\", \"rpm_flow\"], \"accepted_sfp_samples\": 20, \"archived_cycles\": 0}"
+      ]
+    },
+    {
+      "journey": "milestone-5",
+      "exit_code": 0,
+      "seconds": 167.4,
+      "last_output": [
+        "{\"result\": \"pass\", \"deterioration_pct\": 10, \"recovered_pct\": 0.0, \"fan_level_mismatch_rejected\": true, \"boundary_match\": true, \"outside_tolerance_rejected\": true}"
+      ]
+    },
+    {
+      "journey": "milestone-6",
+      "exit_code": 0,
+      "last_output": [
+        "{\"result\": \"pass\", \"slope_w_per_m3s_day\": \"10.0\", \"bucket_count\": 29, \"span_hours\": 112.0, \"point\": \"Medium:350\", \"sparse\": \"insufficient_coverage\", \"negative\": \"-10.0\", \"flat\": \"0.0\", \"new_cycle_trend\": \"unavailable\"}"
+      ]
+    },
+    {
+      "journey": "milestone-7",
+      "exit_code": 0,
+      "seconds": 41.9,
+      "last_output": [
+        "{\"result\": \"pass\", \"heating_pct\": 80, \"cooling_pct\": 80, \"fahrenheit_pct\": 80, \"anomalous_raw_pct\": 120, \"sfp_independent\": true}"
+      ]
+    },
+    {
+      "journey": "quality-regressions",
+      "exit_code": 0,
+      "seconds": 72.5,
+      "last_output": [
+        "{\"result\": \"pass\", \"old_bypass_with_live_evidence\": \"usable\", \"offline_or_pre_reconnect_bypass\": \"unavailable\", \"invalid_duty_sfp\": \"current\", \"qualified_reference\": \"sfp_only\"}"
+      ]
+    },
+    {
+      "journey": "milestone-8",
+      "exit_code": 0,
+      "seconds": 53.7,
+      "last_output": [
+        "{\"result\": \"pass\", \"initial_seconds\": 0.2, \"single_notice_id\": \"zehnder_filter_maintenance\", \"restart_reinstated\": true, \"escalated\": true, \"unknown_suppressed\": true, \"confirmed_cycle\": \"e2e-m8-confirmed-011744\", \"later_episode_notified\": true, \"already_due_startup_seconds\": 6.4}"
+      ]
+    },
+    {
+      "journey": "milestone-9",
+      "exit_code": 0,
+      "seconds": 864.5,
+      "last_output": [
+        "{\"result\": \"pass\", \"incident\": \"2026-10-07T01:21:25.197460+00:00\", \"first_observed\": \"2026-10-07 01:21:25\", \"threshold_seconds\": 600, \"notification_after_threshold_seconds\": 36.0, \"notice_id\": \"zehnder_monitor_reporting_fault\", \"restart_preserved_incident\": true, \"normal_stopped_no_fault\": true, \"recovered_after_three_valid\": true}"
+      ]
+    },
+    {
+      "journey": "milestone-9-edge",
+      "exit_code": 0,
+      "seconds": 16.0,
+      "last_output": [
+        "{\"result\": \"pass\", \"brief_interruption_notified\": false, \"failed_delivery_marked_success\": false, \"retry_notice_id\": \"zehnder_monitor_reporting_fault\", \"new_incident\": \"2026-10-07T01:32:34.499546+00:00\", \"recovered\": true}"
+      ]
+    },
+    {
+      "journey": "milestone-10-rollback",
+      "exit_code": 0,
+      "evidence": {
+        "result": "pass",
+        "rollback_seconds": 16.1,
+        "legacy_history_preserved": 23,
+        "v2_restored": true,
+        "backup": "/opt/stacks/zehnder-monitor-e2e/rollback-m10-20261007T013459Z.tar.gz"
+      }
+    },
+    {
+      "journey": "final-publisher-quality-regressions",
+      "exit_code": 0,
+      "evidence": {
+        "result": "pass",
+        "corrupt_timer_recovery": "awaiting_confirmation",
+        "old_bypass_with_live_evidence": "usable",
+        "offline_or_pre_reconnect_bypass": "unavailable",
+        "invalid_duty_sfp": "current",
+        "qualified_reference": "sfp_only"
+      }
+    }
+  ],
+  "result": "pass",
+  "finished_at": "2026-10-07T01:38:54.611203+00:00",
+  "prior_trend_fixture_failure": {
+    "journey": "milestone-6",
+    "exit_code": 1,
+    "seconds": 148.0,
+    "last_output": [
+      "AssertionError: {'entity_id': 'sensor.zehnder_corrected_trend_quality', 'state': 'insufficient_coverage', 'attributes': {'bucket_count': 1, 'cycle_id': 'e2e-m4-20261007010627', 'first_hour': '2026-10-08T01:00:00+00:00', 'last_hour': '2026-10-08T01:00:00+00:00', 'point': 'Medium:350', 'span_hours': 0.0, 'friendly_name': 'Zehnder Monitor v2 Zehnder Corrected Trend Quality'}, 'last_changed': '2026-10-07T01:07:21.580353+00:00', 'last_reported': '2026-10-07T01:07:44.131264+00:00', 'last_updated': '2026-10-07T01:07:44.131264+00:00', 'context': {'id': '01M49YDVW3EJNHJRK1YF2K9ABQ', 'parent_id': None, 'user_id': None}}"
+    ]
+  },
+  "prior_rollback_fixture_failure": {
+    "journey": "milestone-10-rollback",
+    "exit_code": 1,
+    "seconds": 42.1,
+    "last_output": [
+      "AssertionError: Existing legacy recorder observations were lost"
+    ]
+  },
+  "fixture_corrections": [
+    "Trend replay now provides three recent distinct reports after each four-hour gap; slope and coverage assertions unchanged.",
+    "Rollback compares a fixed history API start because HA synthesizes its first row at the requested start."
+  ],
+  "scope": "Isolated software acceptance; not a new 24-hour production observation.",
+  "final_publisher_sha256": {
+    "corrected.py": "f2367dca3900c22aa7925a64eb20bbe5c705f9f5ebb927ba0a11542394180092",
+    "zehnder_monitor.py": "12735c36e0fe0508b9121efa0af50b4855c5fcfea25d0a5a4ad288a296f2e80d"
+  }
+}

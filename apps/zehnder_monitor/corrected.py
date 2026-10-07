@@ -137,6 +137,36 @@ def _validate_dynamic(inputs, key, now):
     return value * UNITS[key][unit], "current", "fresh_reports"
 
 
+def validate_bypass(inputs, now):
+    """A latched position needs current same-device evidence after connection.
+
+    Never change the original source timestamp or count corroboration as a
+    new position report. Unknown/offline/reconnected evidence fails closed.
+    """
+    status = inputs.get("status") or {}
+    if status and status.get("value") != "on":
+        return None, "unavailable", "device_offline"
+    value, quality, reason = _validate_dynamic(inputs, "bypass", now)
+    if quality not in ("current", "stale"):
+        return value, quality, reason
+    if not status and quality == "current":
+        return value, quality, reason
+    if status.get("value") != "on":
+        return None, quality, reason
+    try:
+        connected = datetime.fromisoformat(status.get("connected_at") or status["reported_at"])
+        position = datetime.fromisoformat(inputs["bypass"]["reported_at"])
+        if connected.tzinfo is None or position < connected or connected > now:
+            return None, "unknown_freshness", "bypass_before_connection"
+    except (KeyError, TypeError, ValueError):
+        return None, "unknown_freshness", "unknown_connection_time"
+    if quality == "current":
+        return value, quality, reason
+    if evaluate_sfp(inputs, now.isoformat())["quality"] != "current":
+        return None, quality, reason
+    return float(inputs["bypass"]["value"]), "current", "latched_position_live_device"
+
+
 def evaluate_fan_effort(inputs, calculated_at):
     """Fan-effort inputs are independent of SFP and temperature inputs."""
     now = datetime.fromisoformat(calculated_at)
@@ -162,7 +192,8 @@ def evaluate_recovery_inputs(inputs, calculated_at):
         return result
     values = {}
     for key in ("bypass", "supply_temp", "outdoor_temp", "extract_temp", "supply_flow", "exhaust_flow"):
-        value, quality, reason = _validate_dynamic(inputs, key, now)
+        value, quality, reason = (validate_bypass(inputs, now) if key == "bypass"
+                                  else _validate_dynamic(inputs, key, now))
         if quality != "current":
             result.update(quality=quality, reason=reason)
             return result
@@ -214,7 +245,7 @@ def evaluate_sampling_eligibility(inputs, sfp_result, recent, calculated_at):
     mode = inputs.get("fan_level")
     if not isinstance(mode, dict) or mode.get("value") not in ("Low", "Medium"):
         return False, "unsupported_fan_level", recent
-    bypass, quality, reason = _validate_dynamic(inputs, "bypass", datetime.fromisoformat(calculated_at))
+    bypass, quality, reason = validate_bypass(inputs, datetime.fromisoformat(calculated_at))
     if quality != "current":
         return False, reason, recent
     if bypass >= 5:
@@ -228,9 +259,13 @@ def evaluate_sampling_eligibility(inputs, sfp_result, recent, calculated_at):
     mean_flow = (values["supply_flow"] + values["exhaust_flow"]) / 2
     if abs(values["supply_flow"] - values["exhaust_flow"]) / mean_flow >= 0.10:
         return False, "flow_imbalance", recent
+    now = datetime.fromisoformat(calculated_at)
+    recent = [item for item in recent if item.get("fan_level") == mode["value"]
+              and item.get("observed_at")
+              and 0 <= (now - datetime.fromisoformat(item["observed_at"])).total_seconds() <= 600]
     fingerprint = sfp_result["fingerprint"]
     if not any(item["fingerprint"] == fingerprint for item in recent):
-        recent = [*recent, {"fingerprint": fingerprint, **values}][-3:]
+        recent = [*recent, {"fingerprint": fingerprint, "fan_level": mode["value"], "observed_at": calculated_at, **values}][-3:]
     if len(recent) < 3:
         return False, "warming_up", recent
     for key in values:
