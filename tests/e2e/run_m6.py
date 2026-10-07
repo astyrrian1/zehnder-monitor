@@ -94,7 +94,10 @@ def main():
             report(start + timedelta(minutes=minute), 72)
         for hour in hours:
             power = 72 + slope * (hour / 24) * (350 / 3600) * 1000
-            report(start + timedelta(hours=hour), power)
+            # A reporting gap must re-establish stability; cached pre-gap
+            # observations cannot qualify the next operating period.
+            for minute in (0, 1, 2):
+                report(start + timedelta(hours=hour, minutes=minute), power)
         return state('trend_quality'), state('sfp_trend')
 
     start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
