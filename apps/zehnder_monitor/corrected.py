@@ -147,18 +147,21 @@ def validate_bypass(inputs, now):
     if status and status.get("value") != "on":
         return None, "unavailable", "device_offline"
     value, quality, reason = _validate_dynamic(inputs, "bypass", now)
-    if quality != "stale":
+    if quality not in ("current", "stale"):
         return value, quality, reason
-    status = inputs.get("status") or {}
+    if not status and quality == "current":
+        return value, quality, reason
     if status.get("value") != "on":
         return None, quality, reason
     try:
         connected = datetime.fromisoformat(status.get("connected_at") or status["reported_at"])
         position = datetime.fromisoformat(inputs["bypass"]["reported_at"])
         if connected.tzinfo is None or position < connected or connected > now:
-            return None, quality, reason
+            return None, "unknown_freshness", "bypass_before_connection"
     except (KeyError, TypeError, ValueError):
-        return None, quality, reason
+        return None, "unknown_freshness", "unknown_connection_time"
+    if quality == "current":
+        return value, quality, reason
     if evaluate_sfp(inputs, now.isoformat())["quality"] != "current":
         return None, quality, reason
     return float(inputs["bypass"]["value"]), "current", "latched_position_live_device"
