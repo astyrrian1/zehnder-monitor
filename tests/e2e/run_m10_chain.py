@@ -34,6 +34,7 @@ def main():
         ('milestone-5', ('run_m5.py',)),
         ('milestone-6', ('run_m6.py',)),
         ('milestone-7', ('run_m7.py',)),
+        ('quality-regressions', ('run_quality_regressions.py',)),
         ('milestone-8', ('run_m8.py',)),
         ('milestone-9', ('run_m9.py',)),
         ('milestone-9-edge', ('run_m9_edge.py',)),
