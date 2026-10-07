@@ -81,7 +81,18 @@ def main():
     assert state('recovery_raw')['state']=='unavailable'
     inject('sensor.zehnder_comfoair_q_a4cb9c_bypass_state',0,'%',datetime.now(timezone.utc))
     until(lambda: state('recovery_quality')['state']=='current')
-    print(json.dumps({'result':'pass','old_bypass_with_live_evidence':'usable',
+    # Corrupt only the named isolated corrected store after stopping its writer.
+    stack = '/opt/stacks/zehnder-monitor-e2e'
+    subprocess.run(['ssh', host, f'cd {stack} && docker compose stop appdaemon'], check=True)
+    corrupt = ("import json,pathlib\n"
+               f"p=pathlib.Path('{stack}/appdaemon/zehnder-monitor/corrected_v2.json')\n"
+               "x=json.loads(p.read_text());x['last_filter_days']='invalid';p.write_text(json.dumps(x))\n")
+    subprocess.run(['ssh', host, 'python3 -'], input=corrupt.encode(), check=True)
+    subprocess.run(['ssh', host, f'cd {stack} && docker compose start appdaemon'], check=True)
+    until(lambda: state('calibration')['state'] == 'awaiting_confirmation')
+    until(lambda: state('sfp_quality')['state'] == 'current')
+    print(json.dumps({'result':'pass','corrupt_timer_recovery':'awaiting_confirmation',
+        'old_bypass_with_live_evidence':'usable',
         'offline_or_pre_reconnect_bypass':'unavailable','invalid_duty_sfp':'current','qualified_reference':'sfp_only'}))
 
 if __name__ == '__main__':
