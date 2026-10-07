@@ -33,6 +33,11 @@ class AuditRegressions(unittest.TestCase):
         c=load_calculation(); x=inputs(T); x['status']['value']='off'
         self.assertNotEqual(c.evaluate_recovery_inputs(x,T.isoformat())['quality'],'current')
 
+    def test_recent_bypass_before_reconnection_is_withheld(self):
+        c=load_calculation(); x=inputs(T)
+        x['bypass']['reported_at']=(T-timedelta(minutes=1)).isoformat()
+        self.assertNotEqual(c.evaluate_recovery_inputs(x,T.isoformat())['quality'],'current')
+
     def test_fan_change_restarts_stability(self):
         c=load_calculation(); recent=[]
         for i,level in enumerate(['Medium','Medium','Low','Low','Low']):
