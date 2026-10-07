@@ -12,7 +12,7 @@ entering calibration or comparisons. Invalid optional measurements do not block
 SFP. Stability restarts on fan-level changes, observation gaps or clean-filter
 confirmation. Corrected persistence is checked before restoration, including
 cycle deadlines, candidate structure, reference values and trend identities;
-invalid files remain on disk for diagnosis and the monitor awaits confirmation.
+invalid state is rejected with a diagnostic and the monitor awaits confirmation.
 
 Observation summaries now require complete elapsed duration, adequate sample
 count and bounded polling gaps. This does not establish full feature acceptance:

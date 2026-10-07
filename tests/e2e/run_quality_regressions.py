@@ -49,8 +49,21 @@ def main():
     inject('sensor.zehnder_comfoair_q_a4cb9c_supply_fan_duty',120,'%',now)
     until(lambda: state('sfp_quality')['attributes'].get('fan_effort_quality')=='invalid')
     assert state('sfp_quality')['state']=='current'
+    inject('sensor.zehnder_comfoair_q_a4cb9c_supply_fan_speed',1250,'rpm',now-timedelta(hours=3))
+    api('/api/events/zehnder_monitor_clean_filters_confirmed', {
+        'event_id':'isolated-quality-'+now.isoformat(), 'both_filter_paths_clean':True})
+    # Real publication cadence; only the isolated calibration durations are shortened.
+    for _ in range(28):
+        stamp=datetime.now(timezone.utc)
+        for suffix,value,unit in [('power',72,'W'),('supply_fan_flow',350,'m³/h'),
+                                  ('exhaust_fan_flow',350,'m³/h')]:
+            inject('sensor.zehnder_comfoair_q_a4cb9c_'+suffix,value,unit,stamp)
+        time.sleep(2)
+    refs=state('calibration')['attributes']['references']
+    assert refs and any('sfp' in metrics for metrics in refs.values()), refs
+    assert all('duty' not in metrics and 'rpm_flow' not in metrics for metrics in refs.values()), refs
     inject('binary_sensor.zehnder_comfoair_q_a4cb9c_status','off',None,now)
-    until(lambda: state('recovery_quality')['attributes'].get('reason')=='stale_bypass')
+    until(lambda: state('recovery_quality')['attributes'].get('reason')=='device_offline')
     assert state('recovery_raw')['state']=='unavailable'
     inject('binary_sensor.zehnder_comfoair_q_a4cb9c_status','on',None,now)
     # A pre-reconnect bypass position is still ineligible.
@@ -59,7 +72,7 @@ def main():
     inject('sensor.zehnder_comfoair_q_a4cb9c_bypass_state',0,'%',datetime.now(timezone.utc))
     until(lambda: state('recovery_quality')['state']=='current')
     print(json.dumps({'result':'pass','old_bypass_with_live_evidence':'usable',
-        'offline_or_pre_reconnect_bypass':'unavailable','invalid_duty_sfp':'current'}))
+        'offline_or_pre_reconnect_bypass':'unavailable','invalid_duty_sfp':'current','qualified_reference':'sfp_only'}))
 
 if __name__ == '__main__':
     main()

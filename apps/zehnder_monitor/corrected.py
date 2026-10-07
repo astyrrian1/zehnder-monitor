@@ -143,6 +143,9 @@ def validate_bypass(inputs, now):
     Never change the original source timestamp or count corroboration as a
     new position report. Unknown/offline/reconnected evidence fails closed.
     """
+    status = inputs.get("status") or {}
+    if status and status.get("value") != "on":
+        return None, "unavailable", "device_offline"
     value, quality, reason = _validate_dynamic(inputs, "bypass", now)
     if quality != "stale":
         return value, quality, reason
@@ -150,7 +153,7 @@ def validate_bypass(inputs, now):
     if status.get("value") != "on":
         return None, quality, reason
     try:
-        connected = datetime.fromisoformat(status["reported_at"])
+        connected = datetime.fromisoformat(status.get("connected_at") or status["reported_at"])
         position = datetime.fromisoformat(inputs["bypass"]["reported_at"])
         if connected.tzinfo is None or position < connected or connected > now:
             return None, quality, reason

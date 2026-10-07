@@ -1265,6 +1265,10 @@ class ZehnderMonitor(hass.Hass):
                     else source.get("last_reported") or source.get("last_updated")
                 ),
             }
+            if key == "status":
+                inputs[key]["connected_at"] = (
+                    attributes.get("source_reported_at") or source.get("last_changed")
+                    or inputs[key]["reported_at"])
         if not getattr(self, "v2_discovery_published", False):
             self.call_service("mqtt/publish", topic="homeassistant/sensor/zehnder_monitor_v2/sfp/config", payload=json.dumps({
                 "name": "Zehnder Corrected SFP",

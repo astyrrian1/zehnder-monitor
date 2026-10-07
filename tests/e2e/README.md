@@ -109,5 +109,6 @@ After the integrated chain, run `run_quality_regressions.py` with the same
 isolated environment. It holds bypass and connection timestamps unchanged while
 power and airflow remain fresh, verifies recovery and sampling, rejects an
 out-of-range duty independently, and tests disconnect/reconnect withholding.
-It never confirms maintenance or controls ventilation. Unlike `seed.py`, this
+It confirms maintenance only in the isolated stack to verify that invalid optional
+metrics cannot qualify references. It never controls ventilation. Unlike `seed.py`, this
 journey deliberately does not refresh every source on every observation.
