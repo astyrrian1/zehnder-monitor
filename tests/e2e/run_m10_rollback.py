@@ -67,8 +67,12 @@ def main():
         subprocess.run(['ssh', host, "sh -c 'cat > " + STACK + "/appdaemon/secrets.yaml'"],
                        input=('ha_token: ' + token + '\n').encode(), check=True)
 
+    # HA synthesizes the starting state at this exact timestamp. A moving
+    # lower bound makes unchanged history appear to lose its first record.
+    history_start = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
     def history():
-        start = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        start = history_start
         end = datetime.now(timezone.utc).isoformat()
         query = urllib.parse.urlencode({'filter_entity_id': LEGACY,
                                         'end_time': end})
@@ -108,7 +112,7 @@ def main():
         elapsed = time.monotonic() - started
         assert elapsed <= 600, f'Rollback exceeded ten minutes: {elapsed:.1f}s'
         current = {(item['last_changed'], item['state']) for series in history() for item in series}
-        assert prior <= current, 'Existing legacy recorder observations were lost'
+        assert prior <= current, f'Existing legacy recorder observations were lost: {prior-current}'
     finally:
         ssh(f'cd {STACK} && tar -xzf {backup} && rm -rf ha/packages-rollback')
         compose('restart ha')
