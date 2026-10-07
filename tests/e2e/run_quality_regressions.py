@@ -15,6 +15,10 @@ def main():
     base = os.environ['ZMON_TEST_HA_URL'].rstrip('/')
     if not base.endswith(':18123'):
         raise SystemExit('Isolated HA required')
+    host = os.environ['ZMON_TEST_STACK_SSH']
+    subprocess.run(['scp', str(HERE.parents[1] / 'apps/zehnder_monitor/zehnder_monitor.py'),
+                    str(HERE.parents[1] / 'apps/zehnder_monitor/corrected.py'),
+                    host + ':/opt/stacks/zehnder-monitor-e2e/appdaemon/apps/'], check=True)
     tokens = json.loads(Path(os.environ['ZMON_TEST_TOKEN_FILE']).read_text())
     request = urllib.request.Request(base+'/auth/token', data=urllib.parse.urlencode({
         'grant_type':'refresh_token','refresh_token':tokens['refresh_token'],'client_id':base+'/'}).encode())
