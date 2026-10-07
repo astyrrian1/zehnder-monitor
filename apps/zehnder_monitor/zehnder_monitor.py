@@ -332,6 +332,12 @@ class ZehnderMonitor(hass.Hass):
         for key in ("seen_confirmation_ids", "archived_references", "trend_reports"):
             if not isinstance(data.get(key, []), list):
                 raise ValueError("invalid " + key)
+        if data.get("last_filter_days") is not None:
+            finite(data["last_filter_days"], float("-inf"))
+        if not isinstance(data.get("timer_confirmation_requested", False), bool):
+            raise ValueError("invalid timer confirmation flag")
+        if any(not isinstance(event, str) or not event for event in data.get("seen_confirmation_ids", [])):
+            raise ValueError("invalid confirmation identity")
         if not isinstance(c.get("candidates", {}), dict):
             raise ValueError("invalid candidates")
         if c["state"] != "awaiting_confirmation":
