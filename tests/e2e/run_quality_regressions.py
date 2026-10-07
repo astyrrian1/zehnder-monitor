@@ -43,6 +43,12 @@ def main():
             'unit_of_measurement':unit,'source_reported_at':stamp.isoformat()}})
     inject('binary_sensor.zehnder_comfoair_q_a4cb9c_status','on',None,now-timedelta(hours=4))
     inject('sensor.zehnder_comfoair_q_a4cb9c_bypass_state',0,'%',now-timedelta(hours=3))
+    for _ in range(3):
+        stamp = datetime.now(timezone.utc)
+        for suffix, value, unit in [('power', 72, 'W'), ('supply_fan_flow', 350, 'm³/h'),
+                                    ('exhaust_fan_flow', 350, 'm³/h')]:
+            inject('sensor.zehnder_comfoair_q_a4cb9c_' + suffix, value, unit, stamp)
+        time.sleep(2.5)
     until(lambda: state('sfp_quality')['attributes'].get('baseline_eligible'))
     until(lambda: state('recovery_raw')['state']=='80.0')
     assert abs(float(state('sfp')['state'])-.740571)<.00005
