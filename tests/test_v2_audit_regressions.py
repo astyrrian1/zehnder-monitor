@@ -67,3 +67,12 @@ class AuditRegressions(unittest.TestCase):
             Path(directory,'corrected_v2.json').write_text(json.dumps({'schema_version':2,'calibration':{'state':'settling','references':{}}}))
             m=ZehnderMonitor.__new__(ZehnderMonitor); m.args={'data_dir':directory}; m.log=lambda *a,**kw:None
             self.assertEqual(m._load_corrected_state()['calibration']['state'],'awaiting_confirmation')
+
+    def test_corrupt_timer_cannot_interrupt_corrected_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data=ZehnderMonitor._corrected_defaults()
+            data['last_filter_days']='not-a-number'
+            Path(directory,'corrected_v2.json').write_text(json.dumps(data))
+            m=ZehnderMonitor.__new__(ZehnderMonitor); m.args={'data_dir':directory}; m.log=lambda *a,**kw:None
+            restored=m._load_corrected_state()
+            self.assertIsNone(restored['last_filter_days'])
