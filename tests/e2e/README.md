@@ -112,3 +112,11 @@ out-of-range duty independently, and tests disconnect/reconnect withholding.
 It confirms maintenance only in the isolated stack to verify that invalid optional
 metrics cannot qualify references. It never controls ventilation. Unlike `seed.py`, this
 journey deliberately does not refresh every source on every observation.
+
+For recovery evidence regressions, run `run_recovery_evidence.py` after
+`run_m7.py` with the same isolated environment. It holds all temperature reports
+fixed while refreshing airflow, then supplies genuine unchanged-value temperature
+reports. It checks oldest-input age, no inflated sample count, warming-up/ready
+states, and unchanged SFP. Captured HA states are written to
+`/private/tmp/zehnder-recovery-evidence.json`. The test restarts only isolated
+AppDaemon and never confirms maintenance.

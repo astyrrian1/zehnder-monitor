@@ -59,6 +59,19 @@ class RecoveryEvidenceTests(unittest.TestCase):
         self.assertEqual(result['conditioned_count'], 5)
         self.assertEqual(result['conditioned_pct'], 80)
 
+    def test_historical_timestamp_does_not_follow_anomalous_reports(self):
+        for i in range(5):
+            self.report(TEMPS, i*30)
+            self.publish(i*30)
+        self.report(TEMPS, 150)
+        self.sources['supply_temp']['value'] = 24
+        result = self.publish(150)
+        self.assertEqual(result['quality'], 'anomalous')
+        self.assertEqual(result['conditioned_state'], 'historical')
+        self.assertEqual(result['last_reported_at'], (T+timedelta(seconds=120)).isoformat())
+        self.assertEqual(result['age_seconds'], 0)
+        self.assertEqual(result['conditioned_age_seconds'], 30)
+
     def test_invalid_current_age_is_not_age_of_historical_median(self):
         for i in range(5):
             self.report(TEMPS, i*30)
