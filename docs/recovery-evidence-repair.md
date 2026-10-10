@@ -50,7 +50,7 @@ The in-memory recovery sample buffer starts empty after the app reload.
 Only `corrected.py` and `zehnder_monitor.py` are deployed under
 `/homeassistant/appdaemon/apps/zehnder-monitor/`. AppDaemon reloads the app;
 Home Assistant does not restart. Backups of both files and corrected persistence
-are in `/homeassistant/appdaemon_backups/recovery-20261010/` on the HA host.
+are in `/backup/zehnder-monitor/recovery-20261010/` on the HA host.
 Rollback restores only the two Python files from that directory. Preserve current
 persistence and recorder data; neither requires migration. Scheduled observation
 remains stopped. No production source simulation or clean-filter confirmation is
