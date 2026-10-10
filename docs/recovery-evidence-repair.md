@@ -38,6 +38,10 @@ The in-memory recovery sample buffer starts empty after the app reload.
   stale temperature, 120% anomaly, and independent SFP availability.
 - `run_recovery_evidence.py` verifies rejected airflow-only reports, accurate age,
   genuine unchanged-value thermal reports reaching 80%, and unchanged SFP.
+- Three successive live publications passed source-age and SFP arithmetic checks;
+  recovery age advanced while thermal sample count remained one. All 153 captured
+  legacy history records across four entities remained present. Calibration still
+  awaits confirmation. Browser visual re-verification awaits test-account sign-in.
 - This focused repair does not claim a new 24-hour production observation or
   independent calibration of physical temperature, airflow, or power sensors.
 

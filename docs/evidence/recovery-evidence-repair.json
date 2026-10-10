@@ -46,7 +46,18 @@
     "calibration": "awaiting_confirmation",
     "ha_restarted": false,
     "physical_commands": 0,
-    "clean_filter_confirmations": 0
+    "clean_filter_confirmations": 0,
+    "successive_publications_verified": 3,
+    "age_seconds_sequence": [
+      155.0,
+      214.9,
+      274.9
+    ],
+    "conditioned_count_sequence": [
+      1,
+      1,
+      1
+    ]
   },
   "browser_verification": "pending authenticated test session"
 }
