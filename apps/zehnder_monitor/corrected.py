@@ -225,14 +225,27 @@ def evaluate_recovery_inputs(inputs, calculated_at):
     return result
 
 
-def conditioned_recovery(raw_pct, fingerprint, now, history, window_seconds=900, reported_at=None):
-    """Historical median stays labeled as history when current raw is missing."""
+def conditioned_recovery(raw_pct, fingerprint, now, history, window_seconds=900, reported_at=None, source_reports=None):
+    """Accept a new thermal set only after every temperature has reported again.
+
+    Date samples by their oldest input, so an active sensor cannot refresh
+    cached temperatures. Historical medians remain separate from current raw.
+    """
     from datetime import timedelta
     cutoff = now - timedelta(seconds=window_seconds)
     history = [item for item in history
                if cutoff <= datetime.fromisoformat(item['reported_at']) <= now]
-    if raw_pct is not None and fingerprint and not any(item['fingerprint'] == fingerprint for item in history):
-        history.append({'fingerprint': fingerprint, 'reported_at': reported_at or now.isoformat(), 'value': raw_pct})
+    report_time = datetime.fromisoformat(reported_at) if reported_at else now
+    previous = history[-1].get('source_reports', {}) if history else {}
+    new_thermal_set = source_reports is None or all(
+        key not in previous or datetime.fromisoformat(stamp) > datetime.fromisoformat(previous[key])
+        for key, stamp in source_reports.items()
+    )
+    if (raw_pct is not None and fingerprint and cutoff <= report_time <= now
+            and new_thermal_set
+            and not any(item['fingerprint'] == fingerprint for item in history)):
+        history.append({'fingerprint': fingerprint, 'reported_at': report_time.isoformat(),
+                        'value': raw_pct, 'source_reports': dict(source_reports or {})})
     if len(history) < 5:
         return None, history
     return statistics.median(item['value'] for item in history), history

@@ -1,0 +1,63 @@
+{
+  "unit_tests": {
+    "passed": 79
+  },
+  "red": {
+    "publisher_failures": 4,
+    "isolated_failure": "Airflow-only reports inflated temperature evidence"
+  },
+  "isolated": {
+    "initial": {
+      "state": "80.0",
+      "age_seconds": 12.6,
+      "conditioned_count": 1,
+      "conditioned_state": "warming_up"
+    },
+    "airflow_only": {
+      "state": "80.0",
+      "age_seconds": 24.6,
+      "conditioned_count": 1,
+      "conditioned_state": "warming_up"
+    },
+    "ready": {
+      "state": "80.0",
+      "age_seconds": 1.4,
+      "conditioned_count": 6,
+      "conditioned_state": "ready"
+    },
+    "sfp": {
+      "state": "0.7406",
+      "age_seconds": null,
+      "conditioned_count": null,
+      "conditioned_state": null
+    }
+  },
+  "m7": {
+    "passed": true,
+    "heating_cooling_fahrenheit_pct": 80,
+    "flagged_anomaly_pct": 120,
+    "sfp_independent": true
+  },
+  "production": {
+    "source_file_hashes_match": true,
+    "sfp_arithmetic_passed": true,
+    "legacy_entities": 4,
+    "prior_history_records_preserved": 153,
+    "calibration": "awaiting_confirmation",
+    "ha_restarted": false,
+    "physical_commands": 0,
+    "clean_filter_confirmations": 0,
+    "successive_publications_verified": 3,
+    "age_seconds_sequence": [
+      155.0,
+      214.9,
+      274.9
+    ],
+    "conditioned_count_sequence": [
+      1,
+      1,
+      1
+    ]
+  },
+  "browser_verification": "pending authenticated test session"
+}

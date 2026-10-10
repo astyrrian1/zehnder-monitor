@@ -1400,7 +1400,7 @@ class ZehnderMonitor(hass.Hass):
                     "state_topic": "zehnder/monitor/v2/state", "value_template": template,
                     "availability_topic": "zehnder/monitor/v2/state", "availability_template": availability,
                     "json_attributes_topic": "zehnder/monitor/v2/state",
-                    "json_attributes_template": "{{ {'quality': value_json.recovery.quality, 'reason': value_json.recovery.reason, 'conditioned_state': value_json.recovery.conditioned_state, 'conditioned_count': value_json.recovery.conditioned_count, 'last_reported_at': value_json.recovery.last_reported_at, 'age_seconds': value_json.recovery.age_seconds, 'window_seconds': value_json.recovery.window_seconds, 'temperatures_c': value_json.recovery.temperatures_c} | tojson }}",
+                    "json_attributes_template": "{{ {'quality': value_json.recovery.quality, 'reason': value_json.recovery.reason, 'conditioned_state': value_json.recovery.conditioned_state, 'conditioned_count': value_json.recovery.conditioned_count, 'last_reported_at': value_json.recovery.last_reported_at, 'age_seconds': value_json.recovery.age_seconds, 'conditioned_last_reported_at': value_json.recovery.conditioned_last_reported_at, 'conditioned_age_seconds': value_json.recovery.conditioned_age_seconds, 'temperature_reported_at': value_json.recovery.temperature_reported_at, 'window_seconds': value_json.recovery.window_seconds, 'temperatures_c': value_json.recovery.temperatures_c} | tojson }}",
                     "unit_of_measurement": "%", "state_class": "measurement", "expire_after": 180,
                     "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
                 }), retain=True)
@@ -1410,7 +1410,7 @@ class ZehnderMonitor(hass.Hass):
                 "default_entity_id": "sensor.zehnder_corrected_recovery_quality",
                 "state_topic": "zehnder/monitor/v2/state", "value_template": "{{ value_json.recovery.quality }}",
                 "json_attributes_topic": "zehnder/monitor/v2/state",
-                "json_attributes_template": "{{ {'reason': value_json.recovery.reason, 'conditioned_state': value_json.recovery.conditioned_state, 'conditioned_count': value_json.recovery.conditioned_count, 'last_reported_at': value_json.recovery.last_reported_at, 'age_seconds': value_json.recovery.age_seconds, 'window_seconds': value_json.recovery.window_seconds, 'temperatures_c': value_json.recovery.temperatures_c} | tojson }}",
+                "json_attributes_template": "{{ {'reason': value_json.recovery.reason, 'conditioned_state': value_json.recovery.conditioned_state, 'conditioned_count': value_json.recovery.conditioned_count, 'last_reported_at': value_json.recovery.last_reported_at, 'age_seconds': value_json.recovery.age_seconds, 'conditioned_last_reported_at': value_json.recovery.conditioned_last_reported_at, 'conditioned_age_seconds': value_json.recovery.conditioned_age_seconds, 'temperature_reported_at': value_json.recovery.temperature_reported_at, 'window_seconds': value_json.recovery.window_seconds, 'temperatures_c': value_json.recovery.temperatures_c} | tojson }}",
                 "expire_after": 180,
                 "device": {"identifiers": ["zehnder_monitor_v2"], "name": "Zehnder Monitor v2"},
             }), retain=True)
@@ -1510,20 +1510,23 @@ class ZehnderMonitor(hass.Hass):
             point: len(samples) for point, samples in calibration.get("candidates", {}).items()
         }
         visible_calibration["timer_confirmation_requested"] = self.v2_state.get("timer_confirmation_requested", False) if hasattr(self, "v2_state") else False
-        recovery_keys = ("supply_temp", "outdoor_temp", "extract_temp", "bypass", "supply_flow", "exhaust_flow")
+        recovery_keys = ("supply_temp", "outdoor_temp", "extract_temp")
         recovery_fingerprint = hashlib.sha256(json.dumps(
             {key: inputs.get(key) for key in recovery_keys}, sort_keys=True
         ).encode()).hexdigest()
         current_recovery = recovery["apparent_sensible_recovery_pct"] if recovery["quality"] == "current" else None
         now = datetime.fromisoformat(result["calculated_at"])
-        source_reported = max(inputs[key]["reported_at"] for key in recovery_keys) if current_recovery is not None else None
+        temperature_reports = {key: inputs[key]["reported_at"] for key in recovery_keys} if recovery["temperatures_c"] else None
+        source_reported = min(temperature_reports.values(), key=datetime.fromisoformat) if temperature_reports else None
+        recovery_window = int(self.args.get("test_recovery_window_seconds", 900)) if getattr(self, "args", {}).get("isolated_test_mode") else 900
         conditioned, self.v2_recovery_samples = conditioned_recovery(
             current_recovery, recovery_fingerprint if current_recovery is not None else None,
             now, getattr(self, "v2_recovery_samples", []),
-            int(self.args.get("test_recovery_window_seconds", 900)) if getattr(self, "args", {}).get("isolated_test_mode") else 900,
-            source_reported,
+            recovery_window, source_reported, temperature_reports,
         )
-        last_reported = self.v2_recovery_samples[-1]["reported_at"] if self.v2_recovery_samples else None
+        conditioned_reported = self.v2_recovery_samples[-1]["reported_at"] if self.v2_recovery_samples else None
+        # Preserve the dashboard's historical timestamp when raw recovery is absent.
+        last_reported = source_reported if current_recovery is not None else conditioned_reported
         recovery_detail = {
             "raw_pct": round(recovery["apparent_sensible_recovery_pct"], 1) if recovery["apparent_sensible_recovery_pct"] is not None else None,
             "quality": recovery["quality"], "reason": recovery["reason"],
@@ -1532,8 +1535,11 @@ class ZehnderMonitor(hass.Hass):
             "conditioned_state": "historical" if conditioned is not None and current_recovery is None else ("ready" if conditioned is not None else "warming_up"),
             "conditioned_count": len(self.v2_recovery_samples),
             "last_reported_at": last_reported,
-            "age_seconds": round((now - datetime.fromisoformat(last_reported)).total_seconds(), 1) if last_reported else None,
-            "window_seconds": 900,
+            "age_seconds": round((now - datetime.fromisoformat(source_reported)).total_seconds(), 1) if source_reported else None,
+            "conditioned_last_reported_at": conditioned_reported,
+            "conditioned_age_seconds": round((now - datetime.fromisoformat(conditioned_reported)).total_seconds(), 1) if conditioned_reported else None,
+            "temperature_reported_at": temperature_reports,
+            "window_seconds": recovery_window,
         }
         payload = {
             "sfp": round(result["sfp"], 4) if result["sfp"] is not None else None,
